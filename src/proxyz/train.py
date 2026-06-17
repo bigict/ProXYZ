@@ -103,6 +103,12 @@ from proxyz.data.dataset import line_iterator, fasta_iterator
     default=None,
     help="TensorBoard log directory (default: <output_dir>/runs).",
 )
+@click.option(
+    "--resume_from_checkpoint",
+    is_flag=True,
+    help="Load the last checkpoint in args.output_dir as saved by a previous instance of Trainer."
+    "Restores model weights, optimizer state, and training step.",
+)
 @click.option("-v", "--verbose", is_flag=True, help="verbose output.")
 def main(**args):
     args = dict2object(**args)
@@ -160,11 +166,6 @@ def main(**args):
     # config._attn_implementation = args.attn_implementation
 
     model = LlamaForCausalLM(config)
-
-    # FlashAttention-2 requires half-precision inputs. Cast model to bf16 when on
-    # CUDA — this is standard for large-scale pretraining (DeepSeek, Llama, etc.)
-    # if args.attn_implementation == "flash_attention_2" and torch.cuda.is_available():
-    #     model = model.to(dtype=torch.bfloat16)
 
     if args.verbose:
         total_params = sum(p.numel() for p in model.parameters())
@@ -290,8 +291,10 @@ def main(**args):
         except Exception as e:
             print(f"[warn] SwanLab init failed ({e}), continuing without SwanLab.")
 
-    # Start pre-training from scratch
-    trainer.train()
+    # Start or resume pre-training
+    if args.resume_from_checkpoint:
+        print(f"Resuming from checkpoint: {args.resume_from_checkpoint}")
+    trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
 
     # Finish SwanLab run
     if _swanlab_active:

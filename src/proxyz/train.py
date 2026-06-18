@@ -83,6 +83,7 @@ from proxyz.data.dataset import line_iterator, fasta_iterator
 )
 @click.option("--logging_steps", type=int, default=10, help="Log every N steps.")
 @click.option("--save_steps", type=int, default=500, help="Checkpoint every N steps.")
+@click.option("--eval_steps", type=int, default=500, help="Run validation every N steps.")
 @click.option(
     "--dataloader_num_workers", type=int, default=4, help="Dataloader worker processes."
 )
@@ -257,6 +258,7 @@ def main(**args):
         adam_beta2=0.95,                              # DeepSeek beta2 standard
         logging_steps=args.logging_steps,
         save_steps=args.save_steps,
+        eval_steps=args.eval_steps,
         bf16=use_cuda,                                # bf16 is preferred over fp16 on modern GPUs
         num_train_epochs=args.num_train_epochs,
         max_steps=args.max_steps,

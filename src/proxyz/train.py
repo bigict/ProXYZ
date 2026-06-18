@@ -164,8 +164,12 @@ def main(**args):
     )
     # # Set attention implementation (flash_attention_2 / sdpa / eager)
     # config._attn_implementation = args.attn_implementation
+    use_cuda = torch.cuda.is_available()
 
     model = LlamaForCausalLM(config)
+    # Ensure all parameters are bf16 — FlashAttention requires fp16 or bf16                                                                                                                                                 │
+    if use_cuda:
+        model = model.to(torch.bfloat16)
 
     if args.verbose:
         total_params = sum(p.numel() for p in model.parameters())
@@ -233,7 +237,6 @@ def main(**args):
     # ==========================================
     # 4. TRAINING ARGUMENTS & EXECUTION
     # ==========================================
-    use_cuda = torch.cuda.is_available()
 
     # Parse report_to: "swanlab,tensorboard" -> ["swanlab", "tensorboard"]
     report_to = [r.strip() for r in args.report_to.split(",") if r.strip()]

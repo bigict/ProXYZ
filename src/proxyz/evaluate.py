@@ -1,16 +1,39 @@
-from typing import Dict, List, Optional
+import os
+from typing import Dict, List, Optional, Tuple
 
 import click
-
+import torch
+import tqdm
 from transformers import AutoTokenizer, EsmForProteinFolding
+from transformers.models.esm.openfold_utils.feats import atom14_to_atom37
+from transformers.models.esm.openfold_utils.protein import Protein as OFProtein
+from transformers.models.esm.openfold_utils.protein import to_pdb
 
 from proxyz.utils import dict2object
+
+
+def read_fasta(fasta_input_file: str) -> List[Tuple[str, str]]:
+    data = []
+    with open(fasta_input_file, "r") as file:
+        sequence_id = None
+        sequence = []
+        for line in file:
+            line = line.strip()
+            if line.startswith(">"):
+                if sequence_id is not None:
+                    data.append([sequence_id, "".join(sequence)])
+                sequence_id = line[1:]
+                sequence = []
+            else:
+                sequence.append(line)
+        if sequence_id is not None:
+            data.append((sequence_id, "".join(sequence)))
+    return data
 
 
 def run_esmfold(
     sequences: List[str],
     path_to_esmfold_out: str,
-    name: str,
     suffix: str,
     cache_dir: Optional[str] = None,
     keep_outputs: bool = False,
@@ -24,7 +47,6 @@ def run_esmfold(
     Args:
         sequences: List of protein sequences to predict
         path_to_esmfold_out: Root directory to store outputs of ESMFold as PDBs
-        name: name to use when storing
         suffix: to use as suffix when storing files
         cache_dir: Cache directory for model weights
         keep_outputs: Whether to keep output directories
@@ -112,10 +134,52 @@ def run_esmfold(
     return out_esm_paths
 
 
+# I got this function from hugging face's ESM notebook example
+def _convert_esm_outputs_to_pdb(outputs) -> List[str]:
+    """Takes ESMFold outputs and converts them to a list of PDBs (as strings)."""
+    final_atom_positions = atom14_to_atom37(outputs["positions"][-1], outputs)
+    outputs = {k: v.to("cpu").numpy() for k, v in outputs.items()}
+    final_atom_positions = final_atom_positions.cpu().numpy()
+    final_atom_mask = outputs["atom37_atom_exists"]
+    pdbs = []
+    for i in range(outputs["aatype"].shape[0]):
+        aa = outputs["aatype"][i]
+        pred_pos = final_atom_positions[i]
+        mask = final_atom_mask[i]
+        resid = outputs["residue_index"][i] + 1
+        pred = OFProtein(
+            aatype=aa,
+            atom_positions=pred_pos,
+            atom_mask=mask,
+            residue_index=resid,
+            b_factors=outputs["plddt"][i],
+            chain_index=outputs["chain_index"][i] if "chain_index" in outputs else None,
+        )
+        pdbs.append(to_pdb(pred))
+    return pdbs
+
+
 @click.command(context_settings={'show_default': True})
+@click.argument("fasta_files", type=click.Path(), nargs=-1)
+@click.option(
+    "--output_dir",
+    type=click.Path(),
+    default="./deepseek_style_model_esm",
+    help="Where pdbs are saved.",
+)
 @click.option("-v", "--verbose", is_flag=True, help="verbose output.")
 def main(**args):
     args = dict2object(**args)
+
+    for i, fasta_file in enumerate(args.fasta_files):
+        data = read_fasta(fasta_file)
+        for j in range(0, len(data), 8):
+            run_esmfold(
+                [sequence for _, sequence in data[j: j+8]],
+                path_to_esmfold_out=args.output_dir,
+                suffix=f"{i}_{j}",
+                keep_outputs=True,
+            )
 
 
 if __name__ == "__main__":

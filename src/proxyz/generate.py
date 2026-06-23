@@ -9,6 +9,8 @@ from transformers import (
     LlamaForCausalLM,
     PreTrainedTokenizerFast,
     GenerationConfig,
+    LogitsProcessorList,
+    SuppressTokensLogitsProcessor,
 )
 
 from proxyz.utils import dict2object
@@ -73,7 +75,7 @@ def load_tokenizer(model_path: str, tokenizer_file: str) -> PreTrainedTokenizerF
 @click.option(
     "--num_tokens",
     type=int,
-    default=256,
+    default=100,
     help="Max number of tokens to generate per sequence. With [EOS] the model "
     "may stop earlier; use --force_length to always generate exactly this many.",
 )
@@ -179,6 +181,19 @@ def main(**args):
     # ==========================================
     # 4. ENCODE PROMPT & GENERATE IN BATCHES
     # ==========================================
+    # Ban all tokens whose string representation contains "X" (unknown residue).
+    # This prevents the model from emitting ambiguous amino-acid placeholders.
+    vocab = tokenizer.get_vocab()
+    suppress_ids = [tid for token, tid in vocab.items()
+                    if "X" in token and not token.startswith("[")]
+    logits_processor = LogitsProcessorList()
+    if suppress_ids:
+        logits_processor.append(
+            SuppressTokensLogitsProcessor(suppress_tokens=suppress_ids, device=device)
+        )
+        if args.verbose:
+            print(f"Suppressed {len(suppress_ids)} tokens containing 'X'")
+
     # Every sequence starts with [BOS], optionally followed by seed residues.
     seed_text = f"{tokenizer.bos_token}{args.prompt}"
     prompt_ids = tokenizer(seed_text, return_tensors="pt", add_special_tokens=False).input_ids
@@ -192,6 +207,7 @@ def main(**args):
             out = model.generate(
                 input_ids=input_ids,
                 generation_config=gen_config,
+                logits_processor=logits_processor,
             )
         for row in out:
             decoded = tokenizer.decode(row.tolist(), skip_special_tokens=True)

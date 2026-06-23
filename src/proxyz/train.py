@@ -7,6 +7,8 @@ import torch
 from transformers import (
     LlamaConfig,
     LlamaForCausalLM,
+    DeepseekV2Config,
+    DeepseekV2ForCausalLM,
     PreTrainedTokenizerFast,
     Trainer,
     TrainingArguments,
@@ -51,6 +53,41 @@ from proxyz.data.dataset import line_iterator, fasta_iterator
     type=int,
     default=4,
     help="Model Grouped-Query Attention (GQA) for speed.",
+)
+@click.option(
+    "--use_mla",
+    is_flag=True,
+    help="Use Multi-head Latent Attention (MLA) from DeepSeek-V2 instead of standard Llama attention.",
+)
+@click.option(
+    "--kv_lora_rank",
+    type=int,
+    default=512,
+    help="MLA: Rank for KV low-rank compression.",
+)
+@click.option(
+    "--q_lora_rank",
+    type=int,
+    default=0,
+    help="MLA: Rank for Q low-rank compression (0 to disable).",
+)
+@click.option(
+    "--qk_nope_head_dim",
+    type=int,
+    default=128,
+    help="MLA: Dimension of non-RoPE part in Q/K heads.",
+)
+@click.option(
+    "--qk_rope_head_dim",
+    type=int,
+    default=64,
+    help="MLA: Dimension of RoPE part in Q/K heads.",
+)
+@click.option(
+    "--v_head_dim",
+    type=int,
+    default=128,
+    help="MLA: Dimension of V heads.",
 )
 @click.option(
     "--max_position_embeddings", type=int, default=4096, help="Context window length."
@@ -158,31 +195,58 @@ def main(**args):
     # ==========================================
     # 2. CONFIGURE DEEPSEEK-STYLE ARCHITECTURE
     # ==========================================
-    # DeepSeek-V2/V3 use Llama-based primitives (SwiGLU, RMSNorm, RoPE)
-    config = LlamaConfig(
-        vocab_size=vocab_size,
-        hidden_size=args.model_hidden_size,                  # Model width
-        intermediate_size=args.model_intermediate_size,      # SwiGLU hidden dimension (usually ~8/3 of hidden_size)
-        num_hidden_layers=args.model_num_hidden_layers,      # Depth
-        num_attention_heads=args.model_num_attention_heads,  # Attention heads
-        num_key_value_heads=args.model_num_key_value_heads,  # Grouped-Query Attention (GQA) for speed
-        hidden_act="silu",                                   # SiLU activation for SwiGLU
-        max_position_embeddings=args.max_position_embeddings,  # Context window length
-        initializer_range=0.02,
-        rms_norm_eps=1e-6,                                   # DeepSeek RMSNorm epsilon
-        pad_token_id=tokenizer.pad_token_id,
-        bos_token_id=tokenizer.bos_token_id,
-        eos_token_id=tokenizer.eos_token_id,
-        attn_implementation=args.attn_implementation,
-        torch_dtype=torch.bfloat16,
-        tie_word_embeddings=False                            # DeepSeek keeps input/output embeddings separate
-    )
-    # # Set attention implementation (flash_attention_2 / sdpa / eager)
-    # config._attn_implementation = args.attn_implementation
-    use_cuda = torch.cuda.is_available()
+    if args.use_mla:
+        # Multi-head Latent Attention (MLA) from DeepSeek-V2
+        config = DeepseekV2Config(
+            vocab_size=vocab_size,
+            hidden_size=args.model_hidden_size,
+            intermediate_size=args.model_intermediate_size,
+            num_hidden_layers=args.model_num_hidden_layers,
+            num_attention_heads=args.model_num_attention_heads,
+            # MLA-specific parameters
+            kv_lora_rank=args.kv_lora_rank,
+            q_lora_rank=args.q_lora_rank,
+            qk_nope_head_dim=args.qk_nope_head_dim,
+            qk_rope_head_dim=args.qk_rope_head_dim,
+            v_head_dim=args.v_head_dim,
+            # Common parameters
+            max_position_embeddings=args.max_position_embeddings,
+            initializer_range=0.02,
+            rms_norm_eps=1e-6,
+            pad_token_id=tokenizer.pad_token_id,
+            bos_token_id=tokenizer.bos_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+            attn_implementation=args.attn_implementation,
+            torch_dtype=torch.bfloat16,
+            tie_word_embeddings=False,
+        )
+        model = DeepseekV2ForCausalLM(config)
+        attn_type = "MLA (DeepSeek-V2)"
+    else:
+        # DeepSeek-V2/V3 use Llama-based primitives (SwiGLU, RMSNorm, RoPE)
+        config = LlamaConfig(
+            vocab_size=vocab_size,
+            hidden_size=args.model_hidden_size,                  # Model width
+            intermediate_size=args.model_intermediate_size,      # SwiGLU hidden dimension (usually ~8/3 of hidden_size)
+            num_hidden_layers=args.model_num_hidden_layers,      # Depth
+            num_attention_heads=args.model_num_attention_heads,  # Attention heads
+            num_key_value_heads=args.model_num_key_value_heads,  # Grouped-Query Attention (GQA) for speed
+            hidden_act="silu",                                   # SiLU activation for SwiGLU
+            max_position_embeddings=args.max_position_embeddings,  # Context window length
+            initializer_range=0.02,
+            rms_norm_eps=1e-6,                                   # DeepSeek RMSNorm epsilon
+            pad_token_id=tokenizer.pad_token_id,
+            bos_token_id=tokenizer.bos_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+            attn_implementation=args.attn_implementation,
+            torch_dtype=torch.bfloat16,
+            tie_word_embeddings=False                            # DeepSeek keeps input/output embeddings separate
+        )
+        model = LlamaForCausalLM(config)
+        attn_type = "Llama GQA"
 
-    model = LlamaForCausalLM(config)
-    # Ensure all parameters are bf16 — FlashAttention requires fp16 or bf16                                                                                                                                                 │
+    # Ensure all parameters are bf16 — FlashAttention requires fp16 or bf16
+    use_cuda = torch.cuda.is_available()
     if use_cuda:
         model = model.to(torch.bfloat16)
 
@@ -190,7 +254,8 @@ def main(**args):
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"--- Dense DeepSeek-Style Model ---")
-        print(f"Attention:           {args.attn_implementation}")
+        print(f"Attention:           {attn_type}")
+        print(f"Attention backend:   {args.attn_implementation}")
         print(f"Total Parameters:    {total_params:,}")
         print(f"Trainable Parameters: {trainable_params:,}")
 

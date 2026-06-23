@@ -310,6 +310,10 @@ def main(**args):
     trainer.save_model(args.output_dir)
     tokenizer.save_pretrained(args.output_dir)
 
+    # Clean up distributed process group to avoid resource leaks
+    if torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
+
 
 if __name__ == "__main__":
     main()

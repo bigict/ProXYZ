@@ -6,7 +6,7 @@ from datetime import datetime
 import click
 import torch
 from transformers import (
-    LlamaForCausalLM,
+    AutoModelForCausalLM,
     PreTrainedTokenizerFast,
     GenerationConfig,
     LogitsProcessorList,
@@ -144,7 +144,7 @@ def main(**args):
     dtype = torch.bfloat16 if use_cuda else torch.float32
     attn_impl = args.attn_implementation if use_cuda else "eager"
 
-    model = LlamaForCausalLM.from_pretrained(
+    model = AutoModelForCausalLM.from_pretrained(
         model_path,
         torch_dtype=dtype,
         attn_implementation=attn_impl,

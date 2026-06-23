@@ -1,4 +1,5 @@
 import os
+import random
 import functools
 
 import click
@@ -83,6 +84,13 @@ from proxyz.data.dataset import line_iterator, fasta_iterator
 )
 @click.option("--logging_steps", type=int, default=10, help="Log every N steps.")
 @click.option("--save_steps", type=int, default=500, help="Checkpoint every N steps.")
+@click.option(
+    "--max_token_length",
+    type=int,
+    default=None,
+    help="If set, randomly crop sequences longer than this to a subsequence of this length. "
+    "Useful for controlling memory usage with variable-length inputs.",
+)
 @click.option(
     "--eval_strategy",
     type=click.Choice(["no", "steps", "epoch"]),
@@ -209,11 +217,19 @@ def main(**args):
             f"{tokenizer.bos_token}{text}{tokenizer.eos_token}"
             for text in examples["text"]
         ]
-        return tokenizer(
+        tokenized = tokenizer(
             wrapped,
             truncation=True,
             max_length=config.max_position_embeddings,
         )
+        # Random crop sequences longer than max_token_length
+        if args.max_token_length:
+            for i, ids in enumerate(tokenized["input_ids"]):
+                if len(ids) > args.max_token_length:
+                    start = random.randint(0, len(ids) - args.max_token_length)
+                    tokenized["input_ids"][i] = ids[start:start + args.max_token_length]
+                    tokenized["attention_mask"][i] = tokenized["attention_mask"][i][start:start + args.max_token_length]
+        return tokenized
 
     train_dataset = train_dataset.map(
         tokenize_function,

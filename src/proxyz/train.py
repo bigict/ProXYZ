@@ -365,13 +365,15 @@ def main(**args):
                 if random.random() < args.fim_spm_rate:
                     # SPM format: <BOS><fim_suffix><suffix><fim_prefix><prefix><fim_middle><middle><EOS>
                     new_ids = [bos_id, fim_suffix_id] + suffix + [fim_prefix_id] + prefix + [fim_middle_id] + middle + [eos_id]
-                    # Labels: -100 for everything except middle
-                    new_labels = [-100] * (3 + len(suffix) + len(prefix)) + middle + [eos_id]
+                    # Labels: -100 for everything except middle+eos
+                    n_mask = 4 + len(suffix) + len(prefix)  # bos + fim_suffix + suffix + fim_prefix + prefix + fim_middle
+                    new_labels = [-100] * n_mask + middle + [eos_id]
                 else:
                     # PSM format: <BOS><fim_prefix><prefix><fim_suffix><suffix><fim_middle><middle><EOS>
                     new_ids = [bos_id, fim_prefix_id] + prefix + [fim_suffix_id] + suffix + [fim_middle_id] + middle + [eos_id]
-                    # Labels: -100 for everything except middle
-                    new_labels = [-100] * (3 + len(prefix) + len(suffix)) + middle + [eos_id]
+                    # Labels: -100 for everything except middle+eos
+                    n_mask = 4 + len(prefix) + len(suffix)  # bos + fim_prefix + prefix + fim_suffix + suffix + fim_middle
+                    new_labels = [-100] * n_mask + middle + [eos_id]
 
                 # Truncate if too long
                 max_len = config.max_position_embeddings
@@ -460,8 +462,45 @@ def main(**args):
             print(f"--- Eval dataset ---")
             print(f"Examples: {len(eval_dataset):,}")
 
-    # Data collator pads each batch and shifts labels internally for Causal LM.
-    data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+    # Custom data collator that handles FIM label padding
+    class FIMDataCollator:
+        def __init__(self, tokenizer, mlm=False):
+            self.tokenizer = tokenizer
+            self.mlm = mlm
+            self.pad_token_id = tokenizer.pad_token_id
+
+        def __call__(self, examples):
+            # Find max length in batch
+            max_len = max(len(ex["input_ids"]) for ex in examples)
+
+            # Pad all sequences
+            input_ids = []
+            attention_mask = []
+            labels = []
+
+            for ex in examples:
+                pad_len = max_len - len(ex["input_ids"])
+                input_ids.append(ex["input_ids"] + [self.pad_token_id] * pad_len)
+                attention_mask.append(ex["attention_mask"] + [0] * pad_len)
+
+                # Handle labels
+                if "labels" in ex:
+                    label_seq = ex["labels"]
+                    # Pad with -100 (ignore index)
+                    labels.append(label_seq + [-100] * pad_len)
+                else:
+                    # If no labels provided, use input_ids (standard LM)
+                    labels.append(ex["input_ids"] + [-100] * pad_len)
+
+            batch = {
+                "input_ids": torch.tensor(input_ids, dtype=torch.long),
+                "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
+                "labels": torch.tensor(labels, dtype=torch.long),
+            }
+            return batch
+
+    # Data collator pads each batch and handles FIM labels
+    data_collator = FIMDataCollator(tokenizer=tokenizer, mlm=False)
 
     # ==========================================
     # 4. TRAINING ARGUMENTS & EXECUTION

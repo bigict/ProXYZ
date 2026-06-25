@@ -49,13 +49,17 @@ def load_tokenizer(model_path: str, tokenizer_file: str) -> PreTrainedTokenizerF
     if os.path.isfile(os.path.join(model_path, "tokenizer.json")):
         return PreTrainedTokenizerFast.from_pretrained(model_path)
 
-    return PreTrainedTokenizerFast(
+    tokenizer = PreTrainedTokenizerFast(
         tokenizer_file=tokenizer_file,
         unk_token="[UNK]",
         pad_token="[PAD]",
         bos_token="[BOS]",
         eos_token="[EOS]",
     )
+    # Add FIM tokens for compatibility with FIM-trained models
+    fim_tokens = ["<fim_prefix>", "<fim_suffix>", "<fim_middle>"]
+    tokenizer.add_special_tokens({"additional_special_tokens": fim_tokens})
+    return tokenizer
 
 
 @click.command(context_settings={'show_default': True})
@@ -98,6 +102,20 @@ def load_tokenizer(model_path: str, tokenizer_file: str) -> PreTrainedTokenizerF
 @click.option("--top_p", type=float, default=0.95, help="Nucleus (top-p) sampling.")
 @click.option("--top_k", type=int, default=0, help="Top-k sampling (0 disables).")
 @click.option("--batch_size", type=int, default=8, help="Sequences generated per batch.")
+@click.option(
+    "--fim_prefix",
+    type=str,
+    default=None,
+    help="FIM infilling: prefix sequence (before the gap). "
+    "Use with --fim_suffix to generate the middle portion.",
+)
+@click.option(
+    "--fim_suffix",
+    type=str,
+    default=None,
+    help="FIM infilling: suffix sequence (after the gap). "
+    "Use with --fim_prefix to generate the middle portion.",
+)
 @click.option(
     "--output_dir",
     type=click.Path(),
@@ -194,9 +212,23 @@ def main(**args):
         if args.verbose:
             print(f"Suppressed {len(suppress_ids)} tokens containing 'X'")
 
-    # Every sequence starts with [BOS], optionally followed by seed residues.
-    seed_text = f"{tokenizer.bos_token}{args.prompt}"
-    prompt_ids = tokenizer(seed_text, return_tensors="pt", add_special_tokens=False).input_ids
+    # Build prompt: FIM infilling or normal generation
+    if args.fim_prefix is not None and args.fim_suffix is not None:
+        # FIM infilling mode: <BOS><fim_suffix><suffix><fim_prefix><prefix><fim_middle>
+        # Model generates the middle portion
+        fim_prompt = (
+            f"{tokenizer.bos_token}"
+            f"<fim_suffix>{args.fim_suffix}"
+            f"<fim_prefix>{args.fim_prefix}"
+            f"<fim_middle>"
+        )
+        prompt_ids = tokenizer(fim_prompt, return_tensors="pt", add_special_tokens=False).input_ids
+        if args.verbose:
+            print(f"FIM infilling mode: prefix={len(args.fim_prefix)} chars, suffix={len(args.fim_suffix)} chars")
+    else:
+        # Normal generation mode
+        seed_text = f"{tokenizer.bos_token}{args.prompt}"
+        prompt_ids = tokenizer(seed_text, return_tensors="pt", add_special_tokens=False).input_ids
 
     sequences = []
     remaining = args.num_sequences

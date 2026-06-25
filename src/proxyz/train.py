@@ -161,6 +161,20 @@ from proxyz.data.dataset import line_iterator, fasta_iterator
     "Useful for controlling memory usage with variable-length inputs.",
 )
 @click.option(
+    "--fim_rate",
+    type=float,
+    default=0.0,
+    help="Probability of applying Fill-in-the-Middle (FIM) transformation to each sequence. "
+    "0.0 disables FIM, 1.0 applies FIM to all sequences (DeepSeek-Coder style).",
+)
+@click.option(
+    "--fim_spm_rate",
+    type=float,
+    default=0.5,
+    help="Among FIM examples, fraction using SPM format (suffix-prefix-middle). "
+    "Remaining use PSM format (prefix-suffix-middle).",
+)
+@click.option(
     "--eval_strategy",
     type=click.Choice(["no", "steps", "epoch"]),
     default="steps",
@@ -221,6 +235,12 @@ def main(**args):
         bos_token="[BOS]",
         eos_token="[EOS]",
     )
+
+    # Add FIM special tokens if FIM training is enabled
+    if args.fim_rate > 0:
+        fim_tokens = ["<fim_prefix>", "<fim_suffix>", "<fim_middle>"]
+        tokenizer.add_special_tokens({"additional_special_tokens": fim_tokens})
+        print(f"Added FIM tokens: {fim_tokens} (vocab size: {len(tokenizer)})")
 
     # Ensure the embedding layer matches this size exactly
     vocab_size = len(tokenizer)
@@ -298,6 +318,7 @@ def main(**args):
     # Tokenize each sequence independently (no cross-sequence concatenation):
     # every line is wrapped as [BOS] + sequence + [EOS] and truncated, so the
     # model learns where sequences start and end (and when to stop generating).
+    # Optionally applies FIM (Fill-in-the-Middle) transformation.
     def tokenize_function(examples):
         wrapped = [
             f"{tokenizer.bos_token}{text}{tokenizer.eos_token}"
@@ -308,13 +329,79 @@ def main(**args):
             truncation=True,
             max_length=config.max_position_embeddings,
         )
-        # Random crop sequences longer than max_token_length
+
+        # Get FIM token IDs if FIM is enabled
+        fim_prefix_id = None
+        fim_suffix_id = None
+        fim_middle_id = None
+        if args.fim_rate > 0:
+            fim_prefix_id = tokenizer.convert_tokens_to_ids("<fim_prefix>")
+            fim_suffix_id = tokenizer.convert_tokens_to_ids("<fim_suffix>")
+            fim_middle_id = tokenizer.convert_tokens_to_ids("<fim_middle>")
+
+        batch_input_ids = []
+        batch_attention_mask = []
+        batch_labels = []
+
+        for i, ids in enumerate(tokenized["input_ids"]):
+            mask = tokenized["attention_mask"][i]
+
+            # Apply FIM transformation with probability fim_rate
+            # Need at least 4 tokens: BOS + 1 prefix + 1 middle + 1 suffix + EOS
+            if args.fim_rate > 0 and len(ids) >= 5 and random.random() < args.fim_rate:
+                # Split: [BOS] prefix middle suffix [EOS]
+                bos_id = ids[0]
+                eos_id = ids[-1]
+                content = ids[1:-1]  # tokens between BOS and EOS
+
+                # Random split into 3 parts
+                n = len(content)
+                cut1 = random.randint(1, n - 1)
+                cut2 = random.randint(cut1, n - 1)
+                prefix = content[:cut1]
+                middle = content[cut1:cut2]
+                suffix = content[cut2:]
+
+                if random.random() < args.fim_spm_rate:
+                    # SPM format: <BOS><fim_suffix><suffix><fim_prefix><prefix><fim_middle><middle><EOS>
+                    new_ids = [bos_id, fim_suffix_id] + suffix + [fim_prefix_id] + prefix + [fim_middle_id] + middle + [eos_id]
+                    # Labels: -100 for everything except middle
+                    new_labels = [-100] * (3 + len(suffix) + len(prefix)) + middle + [eos_id]
+                else:
+                    # PSM format: <BOS><fim_prefix><prefix><fim_suffix><suffix><fim_middle><middle><EOS>
+                    new_ids = [bos_id, fim_prefix_id] + prefix + [fim_suffix_id] + suffix + [fim_middle_id] + middle + [eos_id]
+                    # Labels: -100 for everything except middle
+                    new_labels = [-100] * (3 + len(prefix) + len(suffix)) + middle + [eos_id]
+
+                # Truncate if too long
+                max_len = config.max_position_embeddings
+                if len(new_ids) > max_len:
+                    new_ids = new_ids[:max_len]
+                    new_labels = new_labels[:max_len]
+
+                batch_input_ids.append(new_ids)
+                batch_attention_mask.append([1] * len(new_ids))
+                batch_labels.append(new_labels)
+            else:
+                # Normal training: predict all tokens
+                batch_input_ids.append(ids)
+                batch_attention_mask.append(mask)
+                # Labels are input_ids shifted by 1 (handled by DataCollator)
+                batch_labels.append(ids.copy())
+
+        tokenized["input_ids"] = batch_input_ids
+        tokenized["attention_mask"] = batch_attention_mask
+        tokenized["labels"] = batch_labels
+
+        # Random crop sequences longer than max_token_length (for non-FIM examples)
         if args.max_token_length:
             for i, ids in enumerate(tokenized["input_ids"]):
                 if len(ids) > args.max_token_length:
                     start = random.randint(0, len(ids) - args.max_token_length)
                     tokenized["input_ids"][i] = ids[start:start + args.max_token_length]
                     tokenized["attention_mask"][i] = tokenized["attention_mask"][i][start:start + args.max_token_length]
+                    tokenized["labels"][i] = tokenized["labels"][i][start:start + args.max_token_length]
+
         return tokenized
 
     # Load dataset from HuggingFace or local files

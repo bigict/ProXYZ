@@ -3,6 +3,12 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# ProXYZ training artifacts & experiment logs
+swanlog/
+deepseek_style_model*/
+runs/
+generated_sequences/
+
 # C extensions
 *.so
 

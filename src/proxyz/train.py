@@ -14,7 +14,7 @@ from transformers import (
     TrainingArguments,
     DataCollatorForLanguageModeling,
 )
-from datasets import Dataset
+from datasets import Dataset, load_dataset
 
 from proxyz.utils import dict2object
 from proxyz.data.dataset import line_iterator, fasta_iterator
@@ -24,6 +24,38 @@ from proxyz.data.dataset import line_iterator, fasta_iterator
 @click.argument("data_files", type=click.Path(), nargs=-1)
 @click.option(
     "--eval_files", type=click.Path(), multiple=True, help="evaluate data files"
+)
+@click.option(
+    "--dataset_name",
+    type=str,
+    default=None,
+    help="HuggingFace dataset name (e.g. 'HuggingFaceH4/gsm8k'). "
+    "If provided, loads from HuggingFace instead of DATA_FILES.",
+)
+@click.option(
+    "--dataset_config",
+    type=str,
+    default=None,
+    help="HuggingFace dataset config/subset (e.g. 'main').",
+)
+@click.option(
+    "--dataset_split",
+    type=str,
+    default="train",
+    help="Split to use for training (default: 'train').",
+)
+@click.option(
+    "--dataset_eval_split",
+    type=str,
+    default=None,
+    help="Split to use for validation (e.g. 'validation', 'test'). "
+    "If not set, no eval dataset is loaded from HuggingFace.",
+)
+@click.option(
+    "--text_column",
+    type=str,
+    default="text",
+    help="Column name containing the sequence text (default: 'text').",
 )
 @click.option(
     "--tokenizer_file",
@@ -166,12 +198,13 @@ def main(**args):
     args = dict2object(**args)
 
     # ==========================================
-    # 0. CHECK DATA FILES ARE PROVIDED
+    # 0. CHECK DATA SOURCE IS PROVIDED
     # ==========================================
-    if not args.data_files:
+    if not args.data_files and not args.dataset_name:
         raise click.UsageError(
-            "No DATA_FILES given. Pass one or more sequence files, e.g. "
-            "`train.py data.txt --tokenizer_file uniref90_30000.json`. "
+            "No data source given. Pass one or more sequence files, e.g. "
+            "`train.py data.txt --tokenizer_file uniref90_30000.json`, "
+            "or use --dataset_name to load from HuggingFace. "
             "Use '-' to read from stdin."
         )
 
@@ -260,27 +293,15 @@ def main(**args):
         print(f"Trainable Parameters: {trainable_params:,}")
 
     # ==========================================
-    # 3. PREPARE YOUR DATASET (Line-by-Line)
+    # 3. PREPARE YOUR DATASET
     # ==========================================
-    iterator = fasta_iterator if args.data_format == "fasta" else line_iterator
-
-    # Flatten the batched iterators into one-sequence-per-example records.
-    def data_generator(data_files):
-        for batch in iterator(data_files):
-            for seq in batch:
-                yield {"text": seq}
-
-    train_dataset = Dataset.from_generator(
-        functools.partial(data_generator, args.data_files)
-    )
-
     # Tokenize each sequence independently (no cross-sequence concatenation):
     # every line is wrapped as [BOS] + sequence + [EOS] and truncated, so the
     # model learns where sequences start and end (and when to stop generating).
     def tokenize_function(examples):
         wrapped = [
             f"{tokenizer.bos_token}{text}{tokenizer.eos_token}"
-            for text in examples["text"]
+            for text in examples[args.text_column]
         ]
         tokenized = tokenizer(
             wrapped,
@@ -296,20 +317,53 @@ def main(**args):
                     tokenized["attention_mask"][i] = tokenized["attention_mask"][i][start:start + args.max_token_length]
         return tokenized
 
+    # Load dataset from HuggingFace or local files
+    if args.dataset_name:
+        # Load from HuggingFace Hub
+        print(f"Loading dataset from HuggingFace: {args.dataset_name}")
+        train_dataset = load_dataset(
+            args.dataset_name,
+            name=args.dataset_config,
+            split=args.dataset_split,
+        )
+        eval_dataset = None
+        if args.dataset_eval_split:
+            eval_dataset = load_dataset(
+                args.dataset_name,
+                name=args.dataset_config,
+                split=args.dataset_eval_split,
+            )
+    else:
+        # Load from local files
+        iterator = fasta_iterator if args.data_format == "fasta" else line_iterator
+
+        # Flatten the batched iterators into one-sequence-per-example records.
+        def data_generator(data_files):
+            for batch in iterator(data_files):
+                for seq in batch:
+                    yield {"text": seq}
+
+        train_dataset = Dataset.from_generator(
+            functools.partial(data_generator, args.data_files)
+        )
+        eval_dataset = None
+        if args.eval_files:
+            eval_dataset = Dataset.from_generator(
+                functools.partial(data_generator, args.eval_files)
+            )
+
+    # Apply tokenization
+    columns_to_remove = [args.text_column] if args.dataset_name else ["text"]
     train_dataset = train_dataset.map(
         tokenize_function,
         batched=True,
-        remove_columns=["text"],
+        remove_columns=columns_to_remove,
     )
-    eval_dataset = None
-    if args.eval_files:
-        eval_dataset = Dataset.from_generator(
-            functools.partial(data_generator, args.eval_files)
-        )
+    if eval_dataset:
         eval_dataset = eval_dataset.map(
             tokenize_function,
             batched=True,
-            remove_columns=["text"],
+            remove_columns=columns_to_remove,
         )
 
     if args.verbose:
@@ -345,7 +399,7 @@ def main(**args):
         adam_beta2=0.95,                              # DeepSeek beta2 standard
         logging_steps=args.logging_steps,
         save_steps=args.save_steps,
-        eval_strategy=args.eval_strategy if args.eval_files else "no",
+        eval_strategy=args.eval_strategy if (args.eval_files or args.dataset_eval_split) else "no",
         eval_steps=args.eval_steps if args.eval_strategy == "steps" else None,
         bf16=use_cuda,                                # bf16 is preferred over fp16 on modern GPUs
         num_train_epochs=args.num_train_epochs,

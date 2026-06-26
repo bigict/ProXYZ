@@ -12,7 +12,6 @@ from transformers import (
     PreTrainedTokenizerFast,
     Trainer,
     TrainingArguments,
-    DataCollatorForLanguageModeling,
 )
 from datasets import Dataset, load_dataset
 
@@ -248,52 +247,42 @@ def main(**args):
     # ==========================================
     # 2. CONFIGURE DEEPSEEK-STYLE ARCHITECTURE
     # ==========================================
+    use_cuda = torch.cuda.is_available()
+
+    # Shared config parameters
+    common_config = dict(
+        vocab_size=vocab_size,
+        hidden_size=args.model_hidden_size,
+        intermediate_size=args.model_intermediate_size,
+        num_hidden_layers=args.model_num_hidden_layers,
+        num_attention_heads=args.model_num_attention_heads,
+        max_position_embeddings=args.max_position_embeddings,
+        initializer_range=0.02,
+        rms_norm_eps=1e-6,
+        pad_token_id=tokenizer.pad_token_id,
+        bos_token_id=tokenizer.bos_token_id,
+        eos_token_id=tokenizer.eos_token_id,
+        attn_implementation=args.attn_implementation,
+        torch_dtype=torch.bfloat16,
+        tie_word_embeddings=False,
+    )
+
     if args.use_mla:
-        # Multi-head Latent Attention (MLA) from DeepSeek-V2
         config = DeepseekV2Config(
-            vocab_size=vocab_size,
-            hidden_size=args.model_hidden_size,
-            intermediate_size=args.model_intermediate_size,
-            num_hidden_layers=args.model_num_hidden_layers,
-            num_attention_heads=args.model_num_attention_heads,
-            # MLA-specific parameters
+            **common_config,
             kv_lora_rank=args.kv_lora_rank,
             q_lora_rank=args.q_lora_rank,
             qk_nope_head_dim=args.qk_nope_head_dim,
             qk_rope_head_dim=args.qk_rope_head_dim,
             v_head_dim=args.v_head_dim,
-            # Common parameters
-            max_position_embeddings=args.max_position_embeddings,
-            initializer_range=0.02,
-            rms_norm_eps=1e-6,
-            pad_token_id=tokenizer.pad_token_id,
-            bos_token_id=tokenizer.bos_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-            attn_implementation=args.attn_implementation,
-            torch_dtype=torch.bfloat16,
-            tie_word_embeddings=False,
         )
         model = DeepseekV2ForCausalLM(config)
         attn_type = "MLA (DeepSeek-V2)"
     else:
-        # DeepSeek-V2/V3 use Llama-based primitives (SwiGLU, RMSNorm, RoPE)
         config = LlamaConfig(
-            vocab_size=vocab_size,
-            hidden_size=args.model_hidden_size,                  # Model width
-            intermediate_size=args.model_intermediate_size,      # SwiGLU hidden dimension (usually ~8/3 of hidden_size)
-            num_hidden_layers=args.model_num_hidden_layers,      # Depth
-            num_attention_heads=args.model_num_attention_heads,  # Attention heads
-            num_key_value_heads=args.model_num_key_value_heads,  # Grouped-Query Attention (GQA) for speed
-            hidden_act="silu",                                   # SiLU activation for SwiGLU
-            max_position_embeddings=args.max_position_embeddings,  # Context window length
-            initializer_range=0.02,
-            rms_norm_eps=1e-6,                                   # DeepSeek RMSNorm epsilon
-            pad_token_id=tokenizer.pad_token_id,
-            bos_token_id=tokenizer.bos_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-            attn_implementation=args.attn_implementation,
-            torch_dtype=torch.bfloat16,
-            tie_word_embeddings=False                            # DeepSeek keeps input/output embeddings separate
+            **common_config,
+            num_key_value_heads=args.model_num_key_value_heads,
+            hidden_act="silu",
         )
         model = LlamaForCausalLM(config)
         attn_type = "Llama GQA"
@@ -315,80 +304,74 @@ def main(**args):
     # ==========================================
     # 3. PREPARE YOUR DATASET
     # ==========================================
-    # Tokenize each sequence independently (no cross-sequence concatenation):
-    # every line is wrapped as [BOS] + sequence + [EOS] and truncated, so the
-    # model learns where sequences start and end (and when to stop generating).
-    # Optionally applies FIM (Fill-in-the-Middle) transformation.
+    # Pre-resolve FIM token IDs once (not per-batch)
+    fim_token_ids = None
+    if args.fim_rate > 0:
+        fim_token_ids = {
+            "prefix": tokenizer.convert_tokens_to_ids("<fim_prefix>"),
+            "suffix": tokenizer.convert_tokens_to_ids("<fim_suffix>"),
+            "middle": tokenizer.convert_tokens_to_ids("<fim_middle>"),
+        }
+
+    max_len = config.max_position_embeddings
+
+    def apply_fim(ids, bos_id, eos_id, content, fim_token_ids):
+        """Split content into prefix/middle/suffix and rearrange for FIM training."""
+        n = len(content)
+        cut1 = random.randint(1, n - 1)
+        cut2 = random.randint(cut1, n - 1)
+        prefix, middle, suffix = content[:cut1], content[cut1:cut2], content[cut2:]
+
+        is_spm = random.random() < args.fim_spm_rate
+        if is_spm:
+            # SPM: <BOS><fim_suffix><suffix><fim_prefix><prefix><fim_middle><middle><EOS>
+            first_tag, second_tag = "suffix", "prefix"
+            first, second = suffix, prefix
+        else:
+            # PSM: <BOS><fim_prefix><prefix><fim_suffix><suffix><fim_middle><middle><EOS>
+            first_tag, second_tag = "prefix", "suffix"
+            first, second = prefix, suffix
+
+        new_ids = (
+            [bos_id, fim_token_ids[first_tag]]
+            + first
+            + [fim_token_ids[second_tag]]
+            + second
+            + [fim_token_ids["middle"]]
+            + middle
+            + [eos_id]
+        )
+        n_mask = 4 + len(first) + len(second)
+        new_labels = [-100] * n_mask + middle + [eos_id]
+
+        if len(new_ids) > max_len:
+            new_ids = new_ids[:max_len]
+            new_labels = new_labels[:max_len]
+        return new_ids, new_labels
+
     def tokenize_function(examples):
         wrapped = [
             f"{tokenizer.bos_token}{text}{tokenizer.eos_token}"
             for text in examples[args.text_column]
         ]
-        tokenized = tokenizer(
-            wrapped,
-            truncation=True,
-            max_length=config.max_position_embeddings,
-        )
-
-        # Get FIM token IDs if FIM is enabled
-        fim_prefix_id = None
-        fim_suffix_id = None
-        fim_middle_id = None
-        if args.fim_rate > 0:
-            fim_prefix_id = tokenizer.convert_tokens_to_ids("<fim_prefix>")
-            fim_suffix_id = tokenizer.convert_tokens_to_ids("<fim_suffix>")
-            fim_middle_id = tokenizer.convert_tokens_to_ids("<fim_middle>")
+        tokenized = tokenizer(wrapped, truncation=True, max_length=max_len)
 
         batch_input_ids = []
         batch_attention_mask = []
         batch_labels = []
 
         for i, ids in enumerate(tokenized["input_ids"]):
-            mask = tokenized["attention_mask"][i]
-
-            # Apply FIM transformation with probability fim_rate
-            # Need at least 4 tokens: BOS + 1 prefix + 1 middle + 1 suffix + EOS
-            if args.fim_rate > 0 and len(ids) >= 5 and random.random() < args.fim_rate:
-                # Split: [BOS] prefix middle suffix [EOS]
-                bos_id = ids[0]
-                eos_id = ids[-1]
-                content = ids[1:-1]  # tokens between BOS and EOS
-
-                # Random split into 3 parts
-                n = len(content)
-                cut1 = random.randint(1, n - 1)
-                cut2 = random.randint(cut1, n - 1)
-                prefix = content[:cut1]
-                middle = content[cut1:cut2]
-                suffix = content[cut2:]
-
-                if random.random() < args.fim_spm_rate:
-                    # SPM format: <BOS><fim_suffix><suffix><fim_prefix><prefix><fim_middle><middle><EOS>
-                    new_ids = [bos_id, fim_suffix_id] + suffix + [fim_prefix_id] + prefix + [fim_middle_id] + middle + [eos_id]
-                    # Labels: -100 for everything except middle+eos
-                    n_mask = 4 + len(suffix) + len(prefix)  # bos + fim_suffix + suffix + fim_prefix + prefix + fim_middle
-                    new_labels = [-100] * n_mask + middle + [eos_id]
-                else:
-                    # PSM format: <BOS><fim_prefix><prefix><fim_suffix><suffix><fim_middle><middle><EOS>
-                    new_ids = [bos_id, fim_prefix_id] + prefix + [fim_suffix_id] + suffix + [fim_middle_id] + middle + [eos_id]
-                    # Labels: -100 for everything except middle+eos
-                    n_mask = 4 + len(prefix) + len(suffix)  # bos + fim_prefix + prefix + fim_suffix + suffix + fim_middle
-                    new_labels = [-100] * n_mask + middle + [eos_id]
-
-                # Truncate if too long
-                max_len = config.max_position_embeddings
-                if len(new_ids) > max_len:
-                    new_ids = new_ids[:max_len]
-                    new_labels = new_labels[:max_len]
-
+            # Apply FIM transformation with probability fim_rate (need ≥5 tokens)
+            if fim_token_ids and len(ids) >= 5 and random.random() < args.fim_rate:
+                bos_id, eos_id = ids[0], ids[-1]
+                content = ids[1:-1]
+                new_ids, new_labels = apply_fim(ids, bos_id, eos_id, content, fim_token_ids)
                 batch_input_ids.append(new_ids)
                 batch_attention_mask.append([1] * len(new_ids))
                 batch_labels.append(new_labels)
             else:
-                # Normal training: predict all tokens
                 batch_input_ids.append(ids)
-                batch_attention_mask.append(mask)
-                # Labels are input_ids shifted by 1 (handled by DataCollator)
+                batch_attention_mask.append(tokenized["attention_mask"][i])
                 batch_labels.append(ids.copy())
 
         tokenized["input_ids"] = batch_input_ids
@@ -442,18 +425,14 @@ def main(**args):
             )
 
     # Apply tokenization
-    columns_to_remove = [args.text_column] if args.dataset_name else ["text"]
-    train_dataset = train_dataset.map(
-        tokenize_function,
-        batched=True,
-        remove_columns=columns_to_remove,
-    )
+    text_col = args.text_column if args.dataset_name else "text"
+
+    def tokenize_dataset(dataset):
+        return dataset.map(tokenize_function, batched=True, remove_columns=[text_col])
+
+    train_dataset = tokenize_dataset(train_dataset)
     if eval_dataset:
-        eval_dataset = eval_dataset.map(
-            tokenize_function,
-            batched=True,
-            remove_columns=columns_to_remove,
-        )
+        eval_dataset = tokenize_dataset(eval_dataset)
 
     if args.verbose:
         print(f"--- Train dataset ---")
@@ -462,45 +441,23 @@ def main(**args):
             print(f"--- Eval dataset ---")
             print(f"Examples: {len(eval_dataset):,}")
 
-    # Custom data collator that handles FIM label padding
-    class FIMDataCollator:
-        def __init__(self, tokenizer, mlm=False):
-            self.tokenizer = tokenizer
-            self.mlm = mlm
-            self.pad_token_id = tokenizer.pad_token_id
+    # Data collator that pads input_ids, attention_mask, and labels uniformly
+    pad_token_id = tokenizer.pad_token_id
 
-        def __call__(self, examples):
-            # Find max length in batch
-            max_len = max(len(ex["input_ids"]) for ex in examples)
-
-            # Pad all sequences
-            input_ids = []
-            attention_mask = []
-            labels = []
-
-            for ex in examples:
-                pad_len = max_len - len(ex["input_ids"])
-                input_ids.append(ex["input_ids"] + [self.pad_token_id] * pad_len)
-                attention_mask.append(ex["attention_mask"] + [0] * pad_len)
-
-                # Handle labels
-                if "labels" in ex:
-                    label_seq = ex["labels"]
-                    # Pad with -100 (ignore index)
-                    labels.append(label_seq + [-100] * pad_len)
-                else:
-                    # If no labels provided, use input_ids (standard LM)
-                    labels.append(ex["input_ids"] + [-100] * pad_len)
-
-            batch = {
-                "input_ids": torch.tensor(input_ids, dtype=torch.long),
-                "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
-                "labels": torch.tensor(labels, dtype=torch.long),
-            }
-            return batch
-
-    # Data collator pads each batch and handles FIM labels
-    data_collator = FIMDataCollator(tokenizer=tokenizer, mlm=False)
+    def data_collator(examples):
+        max_len = max(len(ex["input_ids"]) for ex in examples)
+        input_ids, attention_mask, labels = [], [], []
+        for ex in examples:
+            pad_len = max_len - len(ex["input_ids"])
+            input_ids.append(ex["input_ids"] + [pad_token_id] * pad_len)
+            attention_mask.append(ex["attention_mask"] + [0] * pad_len)
+            label_seq = ex.get("labels", ex["input_ids"])
+            labels.append(label_seq + [-100] * pad_len)
+        return {
+            "input_ids": torch.tensor(input_ids, dtype=torch.long),
+            "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
+            "labels": torch.tensor(labels, dtype=torch.long),
+        }
 
     # ==========================================
     # 4. TRAINING ARGUMENTS & EXECUTION

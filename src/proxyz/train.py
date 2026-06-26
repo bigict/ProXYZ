@@ -502,6 +502,13 @@ def main(**args):
 
             # Detect FIM examples: labels start with -100
             is_fim = labels[:, 0] == -100
+
+            # Add FIM/standard counts to logs
+            n_fim = is_fim.sum().item()
+            n_std = (~is_fim).sum().item()
+            logs[f"{prefix}n_fim"] = n_fim
+            logs[f"{prefix}n_std"] = n_std
+
             has_fim = is_fim.any().item()
             has_std = (~is_fim).any().item()
 

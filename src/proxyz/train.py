@@ -467,12 +467,9 @@ def main(**args):
     # Custom Trainer for FIM loss tracking: caches batch data only
     class FIMTrainer(Trainer):
         def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+            # Always cache data for FIM loss tracking (training and eval)
             # Cache data BEFORE calling super (which may modify inputs)
-            if self.state.global_step % self.args.logging_steps == 0:
-                self._fim_cache = (
-                    inputs["labels"].detach().clone(),
-                    None,  # Will cache logits after forward pass
-                )
+            labels = inputs["labels"].detach().clone()
 
             # Call parent compute_loss (handles label smoothing, loss scaling, etc.)
             loss, outputs = super().compute_loss(
@@ -480,10 +477,7 @@ def main(**args):
             )
 
             # Cache logits after forward pass
-            if self.state.global_step % self.args.logging_steps == 0:
-                assert self._fim_cache is not None
-                labels, _ = self._fim_cache
-                self._fim_cache = (labels, outputs.logits.detach().clone())
+            self._fim_cache = (labels, outputs.logits.detach().clone())
 
             return (loss, outputs) if return_outputs else loss
 
@@ -501,6 +495,11 @@ def main(**args):
             self.trainer._fim_cache = None
             labels, logits = cache
 
+            # Detect if this is eval or training based on log keys
+            is_eval = "eval_loss" in logs
+            prefix = "eval_" if is_eval else ""
+            loss_key = f"{prefix}loss"
+
             # Detect FIM examples: labels start with -100
             is_fim = labels[:, 0] == -100
             has_fim = is_fim.any().item()
@@ -508,7 +507,7 @@ def main(**args):
 
             if has_fim and has_std:
                 loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
-                for tag, mask in [("loss_fim", is_fim), ("loss_std", ~is_fim)]:
+                for tag, mask in [(f"{prefix}loss_fim", is_fim), (f"{prefix}loss_std", ~is_fim)]:
                     shift_logits = logits[mask][..., :-1, :].contiguous()
                     shift_labels = labels[mask][..., 1:].contiguous()
                     loss_per_token = loss_fct(
@@ -519,9 +518,9 @@ def main(**args):
                     if valid.any():
                         logs[tag] = loss_per_token[valid].mean().item()
             elif has_fim:
-                logs["loss_fim"] = logs.get("loss")
+                logs[f"{prefix}loss_fim"] = logs.get(loss_key)
             else:
-                logs["loss_std"] = logs.get("loss")
+                logs[f"{prefix}loss_std"] = logs.get(loss_key)
 
 
     # Parse report_to: "swanlab,tensorboard" -> ["swanlab", "tensorboard"]

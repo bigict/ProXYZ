@@ -11,8 +11,8 @@ from transformers import (
     DeepseekV2ForCausalLM,
     PreTrainedTokenizerFast,
     Trainer,
+    TrainerCallback,
     TrainingArguments,
-    DataCollatorForLanguageModeling,
 )
 from datasets import Dataset, load_dataset
 
@@ -161,6 +161,20 @@ from proxyz.data.dataset import line_iterator, fasta_iterator
     "Useful for controlling memory usage with variable-length inputs.",
 )
 @click.option(
+    "--fim_rate",
+    type=float,
+    default=0.0,
+    help="Probability of applying Fill-in-the-Middle (FIM) transformation to each sequence. "
+    "0.0 disables FIM, 1.0 applies FIM to all sequences (DeepSeek-Coder style).",
+)
+@click.option(
+    "--fim_spm_rate",
+    type=float,
+    default=0.5,
+    help="Among FIM examples, fraction using SPM format (suffix-prefix-middle). "
+    "Remaining use PSM format (prefix-suffix-middle).",
+)
+@click.option(
     "--eval_strategy",
     type=click.Choice(["no", "steps", "epoch"]),
     default="steps",
@@ -222,58 +236,54 @@ def main(**args):
         eos_token="[EOS]",
     )
 
+    # Add FIM special tokens if FIM training is enabled
+    if args.fim_rate > 0:
+        fim_tokens = ["<fim_prefix>", "<fim_suffix>", "<fim_middle>"]
+        tokenizer.add_special_tokens({"additional_special_tokens": fim_tokens})
+        print(f"Added FIM tokens: {fim_tokens} (vocab size: {len(tokenizer)})")
+
     # Ensure the embedding layer matches this size exactly
     vocab_size = len(tokenizer)
 
     # ==========================================
     # 2. CONFIGURE DEEPSEEK-STYLE ARCHITECTURE
     # ==========================================
+    use_cuda = torch.cuda.is_available()
+
+    # Shared config parameters
+    common_config = dict(
+        vocab_size=vocab_size,
+        hidden_size=args.model_hidden_size,
+        intermediate_size=args.model_intermediate_size,
+        num_hidden_layers=args.model_num_hidden_layers,
+        num_attention_heads=args.model_num_attention_heads,
+        max_position_embeddings=args.max_position_embeddings,
+        initializer_range=0.02,
+        rms_norm_eps=1e-6,
+        pad_token_id=tokenizer.pad_token_id,
+        bos_token_id=tokenizer.bos_token_id,
+        eos_token_id=tokenizer.eos_token_id,
+        attn_implementation=args.attn_implementation,
+        torch_dtype=torch.bfloat16,
+        tie_word_embeddings=False,
+    )
+
     if args.use_mla:
-        # Multi-head Latent Attention (MLA) from DeepSeek-V2
         config = DeepseekV2Config(
-            vocab_size=vocab_size,
-            hidden_size=args.model_hidden_size,
-            intermediate_size=args.model_intermediate_size,
-            num_hidden_layers=args.model_num_hidden_layers,
-            num_attention_heads=args.model_num_attention_heads,
-            # MLA-specific parameters
+            **common_config,
             kv_lora_rank=args.kv_lora_rank,
             q_lora_rank=args.q_lora_rank,
             qk_nope_head_dim=args.qk_nope_head_dim,
             qk_rope_head_dim=args.qk_rope_head_dim,
             v_head_dim=args.v_head_dim,
-            # Common parameters
-            max_position_embeddings=args.max_position_embeddings,
-            initializer_range=0.02,
-            rms_norm_eps=1e-6,
-            pad_token_id=tokenizer.pad_token_id,
-            bos_token_id=tokenizer.bos_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-            attn_implementation=args.attn_implementation,
-            torch_dtype=torch.bfloat16,
-            tie_word_embeddings=False,
         )
         model = DeepseekV2ForCausalLM(config)
         attn_type = "MLA (DeepSeek-V2)"
     else:
-        # DeepSeek-V2/V3 use Llama-based primitives (SwiGLU, RMSNorm, RoPE)
         config = LlamaConfig(
-            vocab_size=vocab_size,
-            hidden_size=args.model_hidden_size,                  # Model width
-            intermediate_size=args.model_intermediate_size,      # SwiGLU hidden dimension (usually ~8/3 of hidden_size)
-            num_hidden_layers=args.model_num_hidden_layers,      # Depth
-            num_attention_heads=args.model_num_attention_heads,  # Attention heads
-            num_key_value_heads=args.model_num_key_value_heads,  # Grouped-Query Attention (GQA) for speed
-            hidden_act="silu",                                   # SiLU activation for SwiGLU
-            max_position_embeddings=args.max_position_embeddings,  # Context window length
-            initializer_range=0.02,
-            rms_norm_eps=1e-6,                                   # DeepSeek RMSNorm epsilon
-            pad_token_id=tokenizer.pad_token_id,
-            bos_token_id=tokenizer.bos_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-            attn_implementation=args.attn_implementation,
-            torch_dtype=torch.bfloat16,
-            tie_word_embeddings=False                            # DeepSeek keeps input/output embeddings separate
+            **common_config,
+            num_key_value_heads=args.model_num_key_value_heads,
+            hidden_act="silu",
         )
         model = LlamaForCausalLM(config)
         attn_type = "Llama GQA"
@@ -295,26 +305,89 @@ def main(**args):
     # ==========================================
     # 3. PREPARE YOUR DATASET
     # ==========================================
-    # Tokenize each sequence independently (no cross-sequence concatenation):
-    # every line is wrapped as [BOS] + sequence + [EOS] and truncated, so the
-    # model learns where sequences start and end (and when to stop generating).
+    # Pre-resolve FIM token IDs once (not per-batch)
+    fim_token_ids = None
+    if args.fim_rate > 0:
+        fim_token_ids = {
+            "prefix": tokenizer.convert_tokens_to_ids("<fim_prefix>"),
+            "suffix": tokenizer.convert_tokens_to_ids("<fim_suffix>"),
+            "middle": tokenizer.convert_tokens_to_ids("<fim_middle>"),
+        }
+
+    max_len = config.max_position_embeddings
+
+    def apply_fim(ids, bos_id, eos_id, content, fim_token_ids):
+        """Split content into prefix/middle/suffix and rearrange for FIM training."""
+        n = len(content)
+        cut1 = random.randint(1, n - 1)
+        cut2 = random.randint(cut1, n - 1)
+        prefix, middle, suffix = content[:cut1], content[cut1:cut2], content[cut2:]
+
+        is_spm = random.random() < args.fim_spm_rate
+        if is_spm:
+            # SPM: <BOS><fim_suffix><suffix><fim_prefix><prefix><fim_middle><middle><EOS>
+            first_tag, second_tag = "suffix", "prefix"
+            first, second = suffix, prefix
+        else:
+            # PSM: <BOS><fim_prefix><prefix><fim_suffix><suffix><fim_middle><middle><EOS>
+            first_tag, second_tag = "prefix", "suffix"
+            first, second = prefix, suffix
+
+        new_ids = (
+            [bos_id, fim_token_ids[first_tag]]
+            + first
+            + [fim_token_ids[second_tag]]
+            + second
+            + [fim_token_ids["middle"]]
+            + middle
+            + [eos_id]
+        )
+        n_mask = 4 + len(first) + len(second)
+        new_labels = [-100] * n_mask + middle + [eos_id]
+
+        if len(new_ids) > max_len:
+            new_ids = new_ids[:max_len]
+            new_labels = new_labels[:max_len]
+        return new_ids, new_labels
+
     def tokenize_function(examples):
         wrapped = [
             f"{tokenizer.bos_token}{text}{tokenizer.eos_token}"
             for text in examples[args.text_column]
         ]
-        tokenized = tokenizer(
-            wrapped,
-            truncation=True,
-            max_length=config.max_position_embeddings,
-        )
-        # Random crop sequences longer than max_token_length
+        tokenized = tokenizer(wrapped, truncation=True, max_length=max_len)
+
+        batch_input_ids = []
+        batch_attention_mask = []
+        batch_labels = []
+
+        for i, ids in enumerate(tokenized["input_ids"]):
+            # Apply FIM transformation with probability fim_rate (need ≥5 tokens)
+            if fim_token_ids and len(ids) >= 5 and random.random() < args.fim_rate:
+                bos_id, eos_id = ids[0], ids[-1]
+                content = ids[1:-1]
+                new_ids, new_labels = apply_fim(ids, bos_id, eos_id, content, fim_token_ids)
+                batch_input_ids.append(new_ids)
+                batch_attention_mask.append([1] * len(new_ids))
+                batch_labels.append(new_labels)
+            else:
+                batch_input_ids.append(ids)
+                batch_attention_mask.append(tokenized["attention_mask"][i])
+                batch_labels.append(ids.copy())
+
+        tokenized["input_ids"] = batch_input_ids
+        tokenized["attention_mask"] = batch_attention_mask
+        tokenized["labels"] = batch_labels
+
+        # Random crop sequences longer than max_token_length (for non-FIM examples)
         if args.max_token_length:
             for i, ids in enumerate(tokenized["input_ids"]):
                 if len(ids) > args.max_token_length:
                     start = random.randint(0, len(ids) - args.max_token_length)
                     tokenized["input_ids"][i] = ids[start:start + args.max_token_length]
                     tokenized["attention_mask"][i] = tokenized["attention_mask"][i][start:start + args.max_token_length]
+                    tokenized["labels"][i] = tokenized["labels"][i][start:start + args.max_token_length]
+
         return tokenized
 
     # Load dataset from HuggingFace or local files
@@ -353,18 +426,14 @@ def main(**args):
             )
 
     # Apply tokenization
-    columns_to_remove = [args.text_column] if args.dataset_name else ["text"]
-    train_dataset = train_dataset.map(
-        tokenize_function,
-        batched=True,
-        remove_columns=columns_to_remove,
-    )
+    text_col = args.text_column if args.dataset_name else "text"
+
+    def tokenize_dataset(dataset):
+        return dataset.map(tokenize_function, batched=True, remove_columns=[text_col])
+
+    train_dataset = tokenize_dataset(train_dataset)
     if eval_dataset:
-        eval_dataset = eval_dataset.map(
-            tokenize_function,
-            batched=True,
-            remove_columns=columns_to_remove,
-        )
+        eval_dataset = tokenize_dataset(eval_dataset)
 
     if args.verbose:
         print(f"--- Train dataset ---")
@@ -373,12 +442,87 @@ def main(**args):
             print(f"--- Eval dataset ---")
             print(f"Examples: {len(eval_dataset):,}")
 
-    # Data collator pads each batch and shifts labels internally for Causal LM.
-    data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+    # Data collator that pads input_ids, attention_mask, and labels uniformly
+    pad_token_id = tokenizer.pad_token_id
+
+    def data_collator(examples):
+        max_len = max(len(ex["input_ids"]) for ex in examples)
+        input_ids, attention_mask, labels = [], [], []
+        for ex in examples:
+            pad_len = max_len - len(ex["input_ids"])
+            input_ids.append(ex["input_ids"] + [pad_token_id] * pad_len)
+            attention_mask.append(ex["attention_mask"] + [0] * pad_len)
+            label_seq = ex.get("labels", ex["input_ids"])
+            labels.append(label_seq + [-100] * pad_len)
+        return {
+            "input_ids": torch.tensor(input_ids, dtype=torch.long),
+            "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
+            "labels": torch.tensor(labels, dtype=torch.long),
+        }
 
     # ==========================================
     # 4. TRAINING ARGUMENTS & EXECUTION
     # ==========================================
+
+    # Custom Trainer for FIM loss tracking: caches batch data only
+    class FIMTrainer(Trainer):
+        def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+            # Cache data BEFORE calling super (which may modify inputs)
+            if self.state.global_step % self.args.logging_steps == 0:
+                self._fim_cache = (
+                    inputs["labels"].detach().clone(),
+                    None,  # Will cache logits after forward pass
+                )
+
+            # Call parent compute_loss (handles label smoothing, loss scaling, etc.)
+            loss, outputs = super().compute_loss(
+                model, inputs, return_outputs=True, num_items_in_batch=num_items_in_batch
+            )
+
+            # Cache logits after forward pass
+            if self.state.global_step % self.args.logging_steps == 0:
+                assert self._fim_cache is not None
+                labels, _ = self._fim_cache
+                self._fim_cache = (labels, outputs.logits.detach().clone())
+
+            return (loss, outputs) if return_outputs else loss
+
+    # Callback: computes loss_fim / loss_std from cached data
+    class FIMLogCallback(TrainerCallback):
+        def __init__(self, trainer):
+            self.trainer = trainer
+
+        def on_log(self, args, state, control, logs=None, **kwargs):
+            if logs is None:
+                return
+            cache = getattr(self.trainer, "_fim_cache", None)
+            if cache is None:
+                return
+            self.trainer._fim_cache = None
+            labels, logits = cache
+
+            # Detect FIM examples: labels start with -100
+            is_fim = labels[:, 0] == -100
+            has_fim = is_fim.any().item()
+            has_std = (~is_fim).any().item()
+
+            if has_fim and has_std:
+                loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
+                for tag, mask in [("loss_fim", is_fim), ("loss_std", ~is_fim)]:
+                    shift_logits = logits[mask][..., :-1, :].contiguous()
+                    shift_labels = labels[mask][..., 1:].contiguous()
+                    loss_per_token = loss_fct(
+                        shift_logits.view(-1, shift_logits.size(-1)),
+                        shift_labels.view(-1),
+                    )
+                    valid = shift_labels.view(-1) != -100
+                    if valid.any():
+                        logs[tag] = loss_per_token[valid].mean().item()
+            elif has_fim:
+                logs["loss_fim"] = logs.get("loss")
+            else:
+                logs["loss_std"] = logs.get("loss")
+
 
     # Parse report_to: "swanlab,tensorboard" -> ["swanlab", "tensorboard"]
     report_to = [r.strip() for r in args.report_to.split(",") if r.strip()]
@@ -409,7 +553,7 @@ def main(**args):
         run_name=args.run_name,
     )
 
-    trainer = Trainer(
+    trainer = FIMTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
@@ -417,6 +561,11 @@ def main(**args):
         data_collator=data_collator,
         processing_class=tokenizer,                  # transformers >=5 renamed `tokenizer`
     )
+    # trainer.add_callback(FIMLogCallback(trainer=trainer))
+    trainer.callback_handler.callbacks.insert(
+        0, FIMLogCallback(trainer=trainer)
+    )  # insert it to the first one
+
 
     # ==========================================
     # 5. INITIALIZE LOGGERS & START TRAINING

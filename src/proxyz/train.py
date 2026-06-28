@@ -1,9 +1,12 @@
 import os
 import random
 import functools
+import math
+from collections import defaultdict
 
 import click
 import torch
+from torch.utils.data import WeightedRandomSampler
 from transformers import (
     LlamaConfig,
     LlamaForCausalLM,
@@ -206,6 +209,13 @@ from proxyz.data.dataset import line_iterator, fasta_iterator
     is_flag=True,
     help="Load the last checkpoint in args.output_dir as saved by a previous instance of Trainer."
     "Restores model weights, optimizer state, and training step.",
+)
+@click.option(
+    "--cluster_files",
+    type=click.Path(),
+    multiple=True,
+    help="Clustering files for cluster-based sampling. Each file has two columns: "
+    "cluster_id and data_row_id. Sampling weight = n / (1 + log(n)) where n is cluster size.",
 )
 @click.option("-v", "--verbose", is_flag=True, help="verbose output.")
 def main(**args):
@@ -442,6 +452,54 @@ def main(**args):
             print(f"--- Eval dataset ---")
             print(f"Examples: {len(eval_dataset):,}")
 
+    # Load cluster information and compute sampling weights if cluster files provided
+    train_sampler = None
+    if args.cluster_files:
+        # Load all cluster files and build mapping: data_row_id -> cluster_id
+        cluster_map = {}  # data_row_id -> cluster_id
+        for cluster_file in args.cluster_files:
+            with open(cluster_file, 'r') as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) >= 2:
+                        cluster_id = parts[0]
+                        data_row_id = int(parts[1])
+                        cluster_map[data_row_id] = cluster_id
+        
+        # Count cluster sizes
+        cluster_sizes = defaultdict(int)
+        for data_row_id, cluster_id in cluster_map.items():
+            if data_row_id < len(train_dataset):  # Only count valid indices
+                cluster_sizes[cluster_id] += 1
+        
+        # Compute sampling weights: n / (1 + log(n)) for each cluster
+        cluster_weights = {}
+        for cluster_id, n in cluster_sizes.items():
+            cluster_weights[cluster_id] = n / (1 + math.log(n))
+        
+        # Assign weights to each sample
+        sample_weights = []
+        for i in range(len(train_dataset)):
+            if i in cluster_map:
+                cluster_id = cluster_map[i]
+                weight = cluster_weights[cluster_id]
+                sample_weights.append(weight)
+            else:
+                # If no cluster info, use uniform weight (1.0)
+                sample_weights.append(1.0)
+        
+        # Create WeightedRandomSampler
+        train_sampler = WeightedRandomSampler(
+            weights=sample_weights,
+            num_samples=len(sample_weights),
+            replacement=True
+        )
+        
+        if args.verbose:
+            print(f"--- Cluster-based sampling ---")
+            print(f"Clusters: {len(cluster_sizes):,}")
+            print(f"Samples with cluster info: {sum(1 for w in sample_weights if w != 1.0):,}")
+
     # Data collator that pads input_ids, attention_mask, and labels uniformly
     pad_token_id = tokenizer.pad_token_id
 
@@ -466,6 +524,15 @@ def main(**args):
 
     # Custom Trainer for FIM loss tracking: caches batch data only
     class FIMTrainer(Trainer):
+        def __init__(self, train_sampler=None, **kwargs):
+            super().__init__(**kwargs)
+            self.train_sampler = train_sampler
+        
+        def _get_train_sampler(self, train_dataset: Dataset = None):
+            if self.train_sampler is not None:
+                return self.train_sampler
+            return super()._get_train_sampler(dataset)
+        
         def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
             # Always cache data for FIM loss tracking (training and eval)
             # Cache data BEFORE calling super (which may modify inputs)
@@ -566,6 +633,7 @@ def main(**args):
         eval_dataset=eval_dataset,
         data_collator=data_collator,
         processing_class=tokenizer,                  # transformers >=5 renamed `tokenizer`
+        train_sampler=train_sampler,
     )
     # trainer.add_callback(FIMLogCallback(trainer=trainer))
     trainer.callback_handler.callbacks.insert(

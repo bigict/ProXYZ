@@ -327,10 +327,11 @@ def main(**args):
     max_len = config.max_position_embeddings
 
     def apply_fim(ids, bos_id, eos_id, content, fim_token_ids):
-        """Split content into prefix/middle/suffix and rearrange for FIM training."""
+        """Split content into prefix/middle/suffix and rearrange for FIM training.
+        Prefix or suffix may be empty, but middle is always non-empty."""
         n = len(content)
-        cut1 = random.randint(1, n - 1)
-        cut2 = random.randint(cut1, n - 1)
+        cut1 = random.randint(0, n - 1)
+        cut2 = random.randint(cut1 + 1, n)
         prefix, middle, suffix = content[:cut1], content[cut1:cut2], content[cut2:]
 
         is_spm = random.random() < args.fim_spm_rate

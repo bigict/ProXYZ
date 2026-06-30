@@ -476,7 +476,7 @@ def main(**args):
         # Compute sampling weights: n / (1 + log(n)) for each cluster
         cluster_weights = {}
         for cluster_id, n in cluster_sizes.items():
-            cluster_weights[cluster_id] = n / (1 + math.log(n))
+            cluster_weights[cluster_id] = 1 / (1 + math.log(n))
         
         # Assign weights to each sample
         sample_weights = []
@@ -532,7 +532,7 @@ def main(**args):
         def _get_train_sampler(self, train_dataset: Dataset = None):
             if self.train_sampler is not None:
                 return self.train_sampler
-            return super()._get_train_sampler(dataset)
+            return super()._get_train_sampler(train_dataset)
         
         def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
             # Always cache data for FIM loss tracking (training and eval)

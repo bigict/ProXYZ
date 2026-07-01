@@ -14,7 +14,6 @@ from transformers import (
     DeepseekV2ForCausalLM,
     PreTrainedTokenizerFast,
     Trainer,
-    TrainerCallback,
     TrainingArguments,
 )
 from datasets import Dataset, load_dataset
@@ -527,76 +526,84 @@ def main(**args):
     class FIMTrainer(Trainer):
         def __init__(self, train_sampler=None, **kwargs):
             super().__init__(**kwargs)
+
             self.train_sampler = train_sampler
+            self._logs = {}
         
         def _get_train_sampler(self, train_dataset: Dataset = None):
             if self.train_sampler is not None:
                 return self.train_sampler
             return super()._get_train_sampler(train_dataset)
         
-        def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        def compute_loss(
+            self, model, inputs, return_outputs=False, num_items_in_batch=None
+        ):
             # Always cache data for FIM loss tracking (training and eval)
             # Cache data BEFORE calling super (which may modify inputs)
-            labels = inputs["labels"].detach().clone()
+            labels = inputs["labels"].clone()
 
             # Call parent compute_loss (handles label smoothing, loss scaling, etc.)
             loss, outputs = super().compute_loss(
                 model, inputs, return_outputs=True, num_items_in_batch=num_items_in_batch
             )
 
-            # Cache logits after forward pass
-            self._fim_cache = (labels, outputs.logits.detach().clone())
+            # ONLY track training metrics if the model is actively training
+            if model.training:
+                for key, val in self.aux_metric_calculator(
+                    (
+                        self.aux_preprocess_logits_for_metrics(outputs.logits, labels),
+                        labels,
+                    ), prefix=""
+                ).items():
+                    if key in self._logs:
+                        self._logs[key].append(val)
+                    else:
+                        self._logs[key] = [val]
 
             return (loss, outputs) if return_outputs else loss
 
-    # Callback: computes loss_fim / loss_std from cached data
-    class FIMLogCallback(TrainerCallback):
-        def __init__(self, trainer):
-            self.trainer = trainer
+        def log(self, logs, start_time=None):
+            if self._logs:
+                for key, val in self._logs.items():
+                    if isinstance(val, list):
+                        val = sum(val) / len(val)  # Avg.
+                    logs[key] = val
+                self._logs = {}
 
-        def on_log(self, args, state, control, logs=None, **kwargs):
-            if logs is None:
-                return
-            cache = getattr(self.trainer, "_fim_cache", None)
-            if cache is None:
-                return
-            self.trainer._fim_cache = None
-            labels, logits = cache
+            super().log(logs, start_time=start_time)
 
-            # Detect if this is eval or training based on log keys
-            is_eval = "eval_loss" in logs
-            prefix = "eval_" if is_eval else ""
-            loss_key = f"{prefix}loss"
+        @staticmethod
+        def aux_preprocess_logits_for_metrics(logits, labels):
+            loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            loss_per_token = loss_fct(
+                shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
+            )
+            return loss_per_token.view(-1, shift_labels.size(-1))
 
-            # Detect FIM examples: labels start with -100
-            is_fim = labels[:, 0] == -100
+        @staticmethod
+        def aux_metric_calculator(preds, prefix="eval_"):
+            """Computes metrics: n_fim / n_std, loss_fim / loss_std etc"""
+            loss_per_token, labels = preds
 
-            # Add FIM/standard counts to logs
-            n_fim = is_fim.sum().item()
-            n_std = (~is_fim).sum().item()
-            logs[f"{prefix}n_fim"] = n_fim
-            logs[f"{prefix}n_std"] = n_std
+            logs = {}
+            with torch.no_grad():
+                # Detect FIM examples: labels start with -100
+                is_fim = labels[:, 0] == -100
 
-            has_fim = is_fim.any().item()
-            has_std = (~is_fim).any().item()
+                for tag, mask in [("fim", is_fim), ("std", ~is_fim)]:
+                    # Add FIM/standard counts to logs
+                    logs[f"{prefix}n_{tag}"] = mask.sum().item()
 
-            if has_fim and has_std:
-                loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
-                for tag, mask in [(f"{prefix}loss_fim", is_fim), (f"{prefix}loss_std", ~is_fim)]:
-                    shift_logits = logits[mask][..., :-1, :].contiguous()
-                    shift_labels = labels[mask][..., 1:].contiguous()
-                    loss_per_token = loss_fct(
-                        shift_logits.view(-1, shift_logits.size(-1)),
-                        shift_labels.view(-1),
-                    )
-                    valid = shift_labels.view(-1) != -100
-                    if valid.any():
-                        logs[tag] = loss_per_token[valid].mean().item()
-            elif has_fim:
-                logs[f"{prefix}loss_fim"] = logs.get(loss_key)
-            else:
-                logs[f"{prefix}loss_std"] = logs.get(loss_key)
-
+                    # Add FIM/standard loss to logs
+                    if mask.any():
+                        shift_labels = labels[mask][..., 1:]
+                        valid = shift_labels.reshape(-1) != -100
+                        if valid.any():
+                            loss = loss_per_token[mask].reshape(-1)
+                            logs[f"{prefix}loss_{tag}"] = loss[valid].mean().item()
+            return logs
 
     # Parse report_to: "swanlab,tensorboard" -> ["swanlab", "tensorboard"]
     report_to = [r.strip() for r in args.report_to.split(",") if r.strip()]
@@ -619,11 +626,14 @@ def main(**args):
         save_steps=args.save_steps,
         eval_strategy=args.eval_strategy if (args.eval_files or args.dataset_eval_split) else "no",
         eval_steps=args.eval_steps if args.eval_strategy == "steps" else None,
+        eval_accumulation_steps=args.gradient_accumulation_steps,
+        prediction_loss_only=True,                    # only returns the loss
         bf16=use_cuda,                                # bf16 is preferred over fp16 on modern GPUs
+        ddp_find_unused_parameters=False,             # disabled warning
         num_train_epochs=args.num_train_epochs,
         max_steps=args.max_steps,
         dataloader_num_workers=args.dataloader_num_workers,
-        report_to=report_to,                         # SwanLab + TensorBoard
+        report_to=report_to,                          # SwanLab + TensorBoard
         run_name=args.run_name,
     )
 
@@ -635,11 +645,9 @@ def main(**args):
         data_collator=data_collator,
         processing_class=tokenizer,                  # transformers >=5 renamed `tokenizer`
         train_sampler=train_sampler,
+        preprocess_logits_for_metrics=FIMTrainer.aux_preprocess_logits_for_metrics,
+        compute_metrics=FIMTrainer.aux_metric_calculator,
     )
-    # trainer.add_callback(FIMLogCallback(trainer=trainer))
-    trainer.callback_handler.callbacks.insert(
-        0, FIMLogCallback(trainer=trainer)
-    )  # insert it to the first one
 
 
     # ==========================================

@@ -7,7 +7,7 @@ import click
 import torch
 from transformers import (
     AutoModelForCausalLM,
-    PreTrainedTokenizerFast,
+    AutoTokenizer,
     GenerationConfig,
     LogitsProcessorList,
     SuppressTokensLogitsProcessor,
@@ -39,29 +39,6 @@ def wrap_fasta(seq: str, width: int = 60) -> str:
     return "\n".join(seq[i : i + width] for i in range(0, len(seq), width))
 
 
-def load_tokenizer(model_path: str, tokenizer_file: str) -> PreTrainedTokenizerFast:
-    """Load the tokenizer that matches the model.
-
-    Prefer the tokenizer saved alongside the model (it carries the exact vocab
-    and the [BOS]/[EOS] special tokens added during training). Fall back to the
-    standalone tokenizer json, adding the same special tokens as train.py.
-    """
-    if os.path.isfile(os.path.join(model_path, "tokenizer.json")):
-        return PreTrainedTokenizerFast.from_pretrained(model_path)
-
-    tokenizer = PreTrainedTokenizerFast(
-        tokenizer_file=tokenizer_file,
-        unk_token="[UNK]",
-        pad_token="[PAD]",
-        bos_token="[BOS]",
-        eos_token="[EOS]",
-    )
-    # Add FIM tokens for compatibility with FIM-trained models
-    fim_tokens = ["<fim_prefix>", "<fim_suffix>", "<fim_middle>"]
-    tokenizer.add_special_tokens({"additional_special_tokens": fim_tokens})
-    return tokenizer
-
-
 @click.command(context_settings={'show_default': True})
 @click.option(
     "--model_dir",
@@ -69,12 +46,6 @@ def load_tokenizer(model_path: str, tokenizer_file: str) -> PreTrainedTokenizerF
     default="./deepseek_style_model",
     help="Trained model dir. If it has no weights at the root, the latest "
     "checkpoint-* subdirectory is used automatically.",
-)
-@click.option(
-    "--tokenizer_file",
-    type=click.Path(),
-    default="uniref90_30000.json",
-    help="Path to the tokenizer json file (same as used for training).",
 )
 @click.option(
     "--num_tokens",
@@ -147,7 +118,7 @@ def main(**args):
     # 1. RESOLVE MODEL & LOAD TOKENIZER
     # ==========================================
     model_path = resolve_model_path(args.model_dir)
-    tokenizer = load_tokenizer(model_path, args.tokenizer_file)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
 
     if tokenizer.bos_token_id is None or tokenizer.eos_token_id is None:
         raise click.UsageError(

@@ -17,6 +17,5 @@
 # Output: a timestamped FASTA file in ./generated_sequences/
 
 PYTHONPATH=src python src/proxyz/generate.py \
-  --tokenizer_file uniref90_30000.json \
   "$@" \
   -v

@@ -16,29 +16,6 @@ from transformers import (
 from proxyz.utils import dict2object
 
 
-def resolve_model_path(model_dir: str) -> str:
-    """Return model_dir if it holds a model directly, else the latest checkpoint-*."""
-    if os.path.isfile(os.path.join(model_dir, "model.safetensors")) or os.path.isfile(
-        os.path.join(model_dir, "pytorch_model.bin")
-    ):
-        return model_dir
-
-    checkpoints = glob.glob(os.path.join(model_dir, "checkpoint-*"))
-    checkpoints = [c for c in checkpoints if re.search(r"checkpoint-(\d+)$", c)]
-    if not checkpoints:
-        raise click.UsageError(
-            f"No model weights found in {model_dir} and no checkpoint-* subdirectories. "
-            "Pass --model_dir pointing at a trained model or checkpoint."
-        )
-    latest = max(checkpoints, key=lambda c: int(re.search(r"checkpoint-(\d+)$", c).group(1)))
-    return latest
-
-
-def wrap_fasta(seq: str, width: int = 60) -> str:
-    """Wrap a sequence string to FASTA line width."""
-    return "\n".join(seq[i : i + width] for i in range(0, len(seq), width))
-
-
 @click.command(context_settings={'show_default': True})
 @click.option(
     "--model_dir",
@@ -74,20 +51,6 @@ def wrap_fasta(seq: str, width: int = 60) -> str:
 @click.option("--top_k", type=int, default=0, help="Top-k sampling (0 disables).")
 @click.option("--batch_size", type=int, default=8, help="Sequences generated per batch.")
 @click.option(
-    "--fim_prefix",
-    type=str,
-    default=None,
-    help="FIM infilling: prefix sequence (before the gap). "
-    "Use with --fim_suffix to generate the middle portion.",
-)
-@click.option(
-    "--fim_suffix",
-    type=str,
-    default=None,
-    help="FIM infilling: suffix sequence (after the gap). "
-    "Use with --fim_prefix to generate the middle portion.",
-)
-@click.option(
     "--output_dir",
     type=click.Path(),
     default="./generated_sequences",
@@ -117,6 +80,24 @@ def main(**args):
     # ==========================================
     # 1. RESOLVE MODEL & LOAD TOKENIZER
     # ==========================================
+    def resolve_model_path(model_dir: str) -> str:
+        """Return model_dir if it holds a model directly, else the latest checkpoint-*."""
+        if os.path.isfile(os.path.join(model_dir, "model.safetensors")) or os.path.isfile(
+            os.path.join(model_dir, "pytorch_model.bin")
+        ):
+            return model_dir
+
+        checkpoints = glob.glob(os.path.join(model_dir, "checkpoint-*"))
+        checkpoints = [c for c in checkpoints if re.search(r"checkpoint-(\d+)$", c)]
+        if not checkpoints:
+            raise click.UsageError(
+                f"No model weights found in {model_dir} and no checkpoint-* subdirectories. "
+                "Pass --model_dir pointing at a trained model or checkpoint."
+            )
+        latest = max(checkpoints, key=lambda c: int(re.search(r"checkpoint-(\d+)$", c).group(1)))
+        return latest
+
+
     model_path = resolve_model_path(args.model_dir)
     tokenizer = AutoTokenizer.from_pretrained(model_path)
 
@@ -183,23 +164,9 @@ def main(**args):
         if args.verbose:
             print(f"Suppressed {len(suppress_ids)} tokens containing 'X'")
 
-    # Build prompt: FIM infilling or normal generation
-    if args.fim_prefix is not None and args.fim_suffix is not None:
-        # FIM infilling mode: <BOS><fim_suffix><suffix><fim_prefix><prefix><fim_middle>
-        # Model generates the middle portion
-        fim_prompt = (
-            f"{tokenizer.bos_token}"
-            f"<fim_suffix>{args.fim_suffix}"
-            f"<fim_prefix>{args.fim_prefix}"
-            f"<fim_middle>"
-        )
-        prompt_ids = tokenizer(fim_prompt, return_tensors="pt", add_special_tokens=False).input_ids
-        if args.verbose:
-            print(f"FIM infilling mode: prefix={len(args.fim_prefix)} chars, suffix={len(args.fim_suffix)} chars")
-    else:
-        # Normal generation mode
-        seed_text = f"{tokenizer.bos_token}{args.prompt}"
-        prompt_ids = tokenizer(seed_text, return_tensors="pt", add_special_tokens=False).input_ids
+    # Normal generation mode
+    seed_text = f"{tokenizer.bos_token}{args.prompt}"
+    prompt_ids = tokenizer(seed_text, return_tensors="pt", add_special_tokens=False).input_ids
 
     sequences = []
     remaining = args.num_sequences
@@ -227,6 +194,11 @@ def main(**args):
     os.makedirs(args.output_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_path = os.path.join(args.output_dir, f"generated_{timestamp}.fasta")
+
+    def wrap_fasta(seq: str, width: int = 60) -> str:
+        """Wrap a sequence string to FASTA line width."""
+        return "\n".join(seq[i : i + width] for i in range(0, len(seq), width))
+
 
     with open(output_path, "w") as f:
         for i, seq in enumerate(sequences):

@@ -13,6 +13,7 @@ from transformers import (
     SuppressTokensLogitsProcessor,
 )
 
+from proxyz.data import dataset
 from proxyz.utils import dict2object
 
 
@@ -200,15 +201,10 @@ def main(**args):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_path = os.path.join(args.output_dir, f"generated_{timestamp}.fasta")
 
-    def wrap_fasta(seq: str, width: int = 60) -> str:
-        """Wrap a sequence string to FASTA line width."""
-        return "\n".join(seq[i : i + width] for i in range(0, len(seq), width))
-
-
     with open(output_path, "w") as f:
         for i, seq in enumerate(sequences):
             header = f">proxyz_gen_{i} length={len(seq)}"
-            f.write(f"{header}\n{wrap_fasta(seq)}\n")
+            f.write(f"{header}\n{dataset.fasta_wrap(seq)}\n")
 
     print(f"Wrote {len(sequences)} sequences to {output_path}")
 

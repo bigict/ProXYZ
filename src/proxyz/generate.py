@@ -13,6 +13,7 @@ from transformers import (
     SuppressTokensLogitsProcessor,
 )
 
+from proxyz.data import dataset
 from proxyz.utils import dict2object
 
 
@@ -180,9 +181,14 @@ def main(**args):
                 logits_processor=logits_processor,
             )
         for row in out:
-            decoded = tokenizer.decode(row.tolist(), skip_special_tokens=True)
-            # Clean to a contiguous amino-acid string (strip whitespace/specials residue)
-            seq = re.sub(r"\s+", "", decoded)
+            # Decode keeping FIM special tokens, removing only [BOS]/[EOS]/[PAD]/[UNK]
+            decoded = tokenizer.decode(row.tolist(), skip_special_tokens=False)
+            # Remove non-FIM special tokens
+            for special in [tokenizer.bos_token, tokenizer.eos_token, tokenizer.pad_token, tokenizer.unk_token]:
+                if special:
+                    decoded = decoded.replace(special, "")
+            # Remove whitespace (FIM tokens like <fim_prefix> don't contain spaces)
+            seq = decoded.replace(" ", "")
             sequences.append(seq)
         remaining -= n
         if args.verbose:
@@ -195,15 +201,10 @@ def main(**args):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_path = os.path.join(args.output_dir, f"generated_{timestamp}.fasta")
 
-    def wrap_fasta(seq: str, width: int = 60) -> str:
-        """Wrap a sequence string to FASTA line width."""
-        return "\n".join(seq[i : i + width] for i in range(0, len(seq), width))
-
-
     with open(output_path, "w") as f:
         for i, seq in enumerate(sequences):
             header = f">proxyz_gen_{i} length={len(seq)}"
-            f.write(f"{header}\n{wrap_fasta(seq)}\n")
+            f.write(f"{header}\n{dataset.fasta_wrap(seq)}\n")
 
     print(f"Wrote {len(sequences)} sequences to {output_path}")
 

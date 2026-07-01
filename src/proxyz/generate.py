@@ -180,9 +180,14 @@ def main(**args):
                 logits_processor=logits_processor,
             )
         for row in out:
-            decoded = tokenizer.decode(row.tolist(), skip_special_tokens=True)
-            # Clean to a contiguous amino-acid string (strip whitespace/specials residue)
-            seq = re.sub(r"\s+", "", decoded)
+            # Decode keeping FIM special tokens, removing only [BOS]/[EOS]/[PAD]/[UNK]
+            decoded = tokenizer.decode(row.tolist(), skip_special_tokens=False)
+            # Remove non-FIM special tokens
+            for special in [tokenizer.bos_token, tokenizer.eos_token, tokenizer.pad_token, tokenizer.unk_token]:
+                if special:
+                    decoded = decoded.replace(special, "")
+            # Remove whitespace (FIM tokens like <fim_prefix> don't contain spaces)
+            seq = decoded.replace(" ", "")
             sequences.append(seq)
         remaining -= n
         if args.verbose:

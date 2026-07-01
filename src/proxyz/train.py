@@ -20,7 +20,7 @@ from transformers import (
 from datasets import Dataset, load_dataset
 
 from proxyz.utils import dict2object
-from proxyz.data.dataset import line_iterator, fasta_iterator
+from proxyz.data import dataset
 
 
 @click.command(context_settings={'show_default': True})
@@ -248,7 +248,7 @@ def main(**args):
 
     # Add FIM special tokens if FIM training is enabled
     if args.fim_rate > 0:
-        fim_tokens = ["<fim_prefix>", "<fim_suffix>", "<fim_middle>"]
+        fim_tokens = dataset.FIM_TOKENS
         tokenizer.add_special_tokens({"additional_special_tokens": fim_tokens})
         print(f"Added FIM tokens: {fim_tokens} (vocab size: {len(tokenizer)})")
 
@@ -319,9 +319,9 @@ def main(**args):
     fim_token_ids = None
     if args.fim_rate > 0:
         fim_token_ids = {
-            "prefix": tokenizer.convert_tokens_to_ids("<fim_prefix>"),
-            "suffix": tokenizer.convert_tokens_to_ids("<fim_suffix>"),
-            "middle": tokenizer.convert_tokens_to_ids("<fim_middle>"),
+            "prefix": tokenizer.convert_tokens_to_ids(dataset.FIM_PREFIX),
+            "suffix": tokenizer.convert_tokens_to_ids(dataset.FIM_SUFFIX),
+            "middle": tokenizer.convert_tokens_to_ids(dataset.FIM_MIDDLE),
         }
 
     max_len = config.max_position_embeddings
@@ -419,7 +419,7 @@ def main(**args):
             )
     else:
         # Load from local files
-        iterator = fasta_iterator if args.data_format == "fasta" else line_iterator
+        iterator = dataset.fasta_iterator if args.data_format == "fasta" else dataset.line_iterator
 
         # Flatten the batched iterators into one-sequence-per-example records.
         def data_generator(data_files):

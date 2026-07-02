@@ -188,9 +188,10 @@ from proxyz.data import dataset
 )
 @click.option(
     "--report_to",
-    default="swanlab,tensorboard",
-    help="Comma-separated logging integrations (e.g. 'swanlab,tensorboard'). "
-    "Use 'none' to disable.",
+    multiple=True,
+    default=("swanlab", "tensorboard"),
+    help="Logging integration(s). Repeat for multiple, e.g. "
+    "--report_to swanlab --report_to tensorboard. Use 'none' to disable.",
 )
 @click.option(
     "--run_name",
@@ -605,10 +606,9 @@ def main(**args):
                             logs[f"{prefix}loss_{tag}"] = loss[valid].mean().item()
             return logs
 
-    # Parse report_to: "swanlab,tensorboard" -> ["swanlab", "tensorboard"]
-    report_to = [r.strip() for r in args.report_to.split(",") if r.strip()]
-    if report_to == ["none"]:
-        report_to = "none"
+    report_to = list(args.report_to) if args.report_to else []
+    if report_to == ["none"] or report_to == ["all"]:
+        report_to = "".join(report_to)
 
     # TensorBoard log directory (set via env var; `logging_dir` kwarg is deprecated)
     logging_dir = args.logging_dir or f"{args.output_dir}/runs"

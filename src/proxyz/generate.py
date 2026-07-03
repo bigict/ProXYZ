@@ -229,16 +229,17 @@ def main(**args):
     # Residue-length control: suppress/force [EOS] based on decoded amino-acid count.
     if args.min_residues is not None or args.max_residues is not None:
         # Tell the length-control processor how many prompt tokens to skip.
-        length_proc = LengthControlLogitsProcessor(
-            tokenizer=tokenizer,
-            prompt_ids.shape[1],
-            min_residues=args.min_residues,
-            max_residues=args.max_residues,
+        logits_processor.append(
+            LengthControlLogitsProcessor(
+                tokenizer=tokenizer,
+                prompt_len=prompt_ids.shape[1],
+                min_residues=args.min_residues,
+                max_residues=args.max_residues,
+            )
         )
-        logits_processor.append(length_proc)
         if args.verbose:
             lo = args.min_residues if args.min_residues is not None else 0
-            hi = args.max_residues if args.max_residues is not None else "∞"
+            hi = args.max_residues if args.max_residues is not None else float("inf")
             print(f"Residue length control: [{lo}, {hi}]")
 
     sequences = []

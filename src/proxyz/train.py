@@ -315,20 +315,14 @@ def main(**args):
     # ==========================================
     # 3. PREPARE YOUR DATASET
     # ==========================================
-    # Pre-resolve FIM token IDs once (not per-batch)
-    fim_token_ids = None
-    if args.fim_rate > 0:
-        fim_token_ids = {
-            "prefix": tokenizer.convert_tokens_to_ids(dataset.FIM_PREFIX),
-            "suffix": tokenizer.convert_tokens_to_ids(dataset.FIM_SUFFIX),
-            "middle": tokenizer.convert_tokens_to_ids(dataset.FIM_MIDDLE),
-        }
-
     max_len = config.max_position_embeddings
 
-    def apply_fim(ids, bos_id, eos_id, content, fim_token_ids):
+    def apply_fim(ids):
         """Split content into prefix/middle/suffix and rearrange for FIM training.
         Prefix or suffix may be empty, but middle is always non-empty."""
+        assert ids[0] == tokenizer.bos_token_id and ids[-1] == tokenizer.eos_token_id
+        content = ids[1:-1]
+
         n = len(content)
         cut1 = random.randint(0, n - 1)
         cut2 = random.randint(cut1 + 1, n)
@@ -337,24 +331,24 @@ def main(**args):
         is_spm = random.random() < args.fim_spm_rate
         if is_spm:
             # SPM: <BOS><fim_suffix><suffix><fim_prefix><prefix><fim_middle><middle><EOS>
-            first_tag, second_tag = "suffix", "prefix"
+            first_tag, second_tag = dataset.FIM_SUFFIX, dataset.FIM_PREFIX
             first, second = suffix, prefix
         else:
             # PSM: <BOS><fim_prefix><prefix><fim_suffix><suffix><fim_middle><middle><EOS>
-            first_tag, second_tag = "prefix", "suffix"
+            first_tag, second_tag = dataset.FIM_PREFIX, dataset.FIM_SUFFIX
             first, second = prefix, suffix
 
         new_ids = (
-            [bos_id, fim_token_ids[first_tag]]
+            [tokenizer.bos_token_id, tokenizer.convert_tokens_to_ids(first_tag)]
             + first
-            + [fim_token_ids[second_tag]]
+            + [tokenizer.convert_tokens_to_ids(second_tag)]
             + second
-            + [fim_token_ids["middle"]]
+            + [tokenizer.convert_tokens_to_ids(dataset.FIM_MIDDLE)]
             + middle
-            + [eos_id]
+            + [tokenizer.eos_token_id]
         )
         n_mask = 4 + len(first) + len(second)
-        new_labels = [-100] * n_mask + middle + [eos_id]
+        new_labels = [-100] * n_mask + middle + [tokenizer.eos_token_id]
 
         if len(new_ids) > max_len:
             new_ids = new_ids[:max_len]
@@ -374,10 +368,8 @@ def main(**args):
 
         for i, ids in enumerate(tokenized["input_ids"]):
             # Apply FIM transformation with probability fim_rate (need ≥5 tokens)
-            if fim_token_ids and len(ids) >= 5 and random.random() < args.fim_rate:
-                bos_id, eos_id = ids[0], ids[-1]
-                content = ids[1:-1]
-                new_ids, new_labels = apply_fim(ids, bos_id, eos_id, content, fim_token_ids)
+            if len(ids) >= 5 and random.random() < args.fim_rate:
+                new_ids, new_labels = apply_fim(ids)
                 batch_input_ids.append(new_ids)
                 batch_attention_mask.append([1] * len(new_ids))
                 batch_labels.append(new_labels)
@@ -627,7 +619,6 @@ def main(**args):
         eval_strategy=args.eval_strategy if (args.eval_files or args.dataset_eval_split) else "no",
         eval_steps=args.eval_steps if args.eval_strategy == "steps" else None,
         eval_accumulation_steps=args.gradient_accumulation_steps,
-        prediction_loss_only=True,                    # only returns the loss
         bf16=use_cuda,                                # bf16 is preferred over fp16 on modern GPUs
         ddp_find_unused_parameters=False,             # disabled warning
         num_train_epochs=args.num_train_epochs,

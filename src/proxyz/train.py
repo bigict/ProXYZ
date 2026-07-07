@@ -177,6 +177,12 @@ from proxyz.data import dataset
     "Remaining use PSM format (prefix-suffix-middle).",
 )
 @click.option(
+    "--fim_text",
+    is_flag=True,
+    help="Construct FIM format at text level before tokenizing (matches inference). "
+    "Default: tokenize first, then rearrange token IDs for FIM.",
+)
+@click.option(
     "--eval_strategy",
     type=click.Choice(["no", "steps", "epoch"]),
     default="steps",
@@ -317,11 +323,12 @@ def main(**args):
     # ==========================================
     max_len = config.max_position_embeddings
 
-    def apply_fim(ids):
+    def apply_fim(content, is_text=False):
         """Split content into prefix/middle/suffix and rearrange for FIM training.
         Prefix or suffix may be empty, but middle is always non-empty."""
-        assert ids[0] == tokenizer.bos_token_id and ids[-1] == tokenizer.eos_token_id
-        content = ids[1:-1]
+        if not is_text:
+            assert content[0] == tokenizer.bos_token_id and content[-1] == tokenizer.eos_token_id
+            content = content[1:-1]
 
         n = len(content)
         cut1 = random.randint(0, n - 1)
@@ -338,6 +345,9 @@ def main(**args):
             first_tag, second_tag = dataset.FIM_PREFIX, dataset.FIM_SUFFIX
             first, second = prefix, suffix
 
+        if is_text:
+            return first_tag + first + second_tag + second + dataset.FIM_MIDDLE + middle
+
         new_ids = (
             [tokenizer.bos_token_id, tokenizer.convert_tokens_to_ids(first_tag)]
             + first
@@ -347,17 +357,18 @@ def main(**args):
             + middle
             + [tokenizer.eos_token_id]
         )
-        n_mask = 4 + len(first) + len(second)
-        new_labels = [-100] * n_mask + middle + [tokenizer.eos_token_id]
-
-        if len(new_ids) > max_len:
-            new_ids = new_ids[:max_len]
-            new_labels = new_labels[:max_len]
-        return new_ids, new_labels
+        return new_ids
 
     def tokenize_function(examples):
+        do_fim = random.random() < args.fim_rate
+
+        if do_fim and args.fim_text:
+            text_process_fn = functools.partial(apply_fim, is_text=True)
+        else:
+            text_process_fn = lambda x: x
+
         wrapped = [
-            f"{tokenizer.bos_token}{text}{tokenizer.eos_token}"
+            f"{tokenizer.bos_token}{text_process_fn(text)}{tokenizer.eos_token}"
             for text in examples[args.text_column]
         ]
         tokenized = tokenizer(wrapped, truncation=True, max_length=max_len)
@@ -368,11 +379,15 @@ def main(**args):
 
         for i, ids in enumerate(tokenized["input_ids"]):
             # Apply FIM transformation with probability fim_rate (need ≥5 tokens)
-            if len(ids) >= 5 and random.random() < args.fim_rate:
-                new_ids, new_labels = apply_fim(ids)
-                batch_input_ids.append(new_ids)
-                batch_attention_mask.append([1] * len(new_ids))
-                batch_labels.append(new_labels)
+            if do_fim:
+                if args.fim_text:
+                    batch_attention_mask.append(tokenized["attention_mask"][i])
+                else:
+                    ids = apply_fim(ids)
+                    batch_attention_mask.append([1] * len(ids))
+                batch_input_ids.append(ids)
+                k = ids.index(tokenizer.convert_tokens_to_ids(dataset.FIM_MIDDLE)) + 1
+                batch_labels.append([-100] * k + ids[k:])
             else:
                 batch_input_ids.append(ids)
                 batch_attention_mask.append(tokenized["attention_mask"][i])

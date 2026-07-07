@@ -132,6 +132,20 @@ from proxyz.data import dataset
     default="flash_attention_2",
     help="Attention backend. flash_attention_2 is fastest on Ampere/Ada+ GPUs.",
 )
+# --- U-Net style architecture options ---
+@click.option(
+    "--unet",
+    is_flag=True,
+    help="U-Net style: AA encoder → BPE encoder → AA decoder, predict next amino acid.",
+)
+@click.option("--aa_encoder_layers", type=int, default=4, help="U-Net: AA encoder layers.")
+@click.option("--bpe_encoder_layers", type=int, default=12, help="U-Net: BPE encoder layers.")
+@click.option("--aa_decoder_layers", type=int, default=4, help="U-Net: AA decoder layers.")
+@click.option(
+    "--no_skip_connection",
+    is_flag=True,
+    help="U-Net: disable skip connection between AA encoder and AA decoder.",
+)
 @click.option(
     "--output_dir",
     type=click.Path(),
@@ -293,16 +307,66 @@ def main(**args):
             qk_rope_head_dim=args.qk_rope_head_dim,
             v_head_dim=args.v_head_dim,
         )
-        model = DeepseekV2ForCausalLM(config)
-        attn_type = "MLA (DeepSeek-V2)"
-    else:
-        config = LlamaConfig(
-            **common_config,
+    elif args.unet:
+        # --- U-Net style: AA encoder → BPE encoder → AA decoder ---
+        from proxyz.model import ProXYZConfig, ProXYZForCausalLM
+
+        config = ProXYZConfig(
+            vocab_size=vocab_size,
+            hidden_size=args.model_hidden_size,
+            intermediate_size=args.model_intermediate_size,
+            num_attention_heads=args.model_num_attention_heads,
             num_key_value_heads=args.model_num_key_value_heads,
-            hidden_act="silu",
+            aa_encoder_layers=args.aa_encoder_layers,
+            bpe_encoder_layers=args.bpe_encoder_layers,
+            aa_decoder_layers=args.aa_decoder_layers,
+            max_position_embeddings=args.max_position_embeddings,
+            rms_norm_eps=1e-6,
+            use_skip_connection=not args.no_skip_connection,
+            pad_token_id=tokenizer.pad_token_id,
+            bos_token_id=tokenizer.bos_token_id,
+            eos_token_id=tokenizer.eos_token_id,
         )
-        model = LlamaForCausalLM(config)
-        attn_type = "Llama GQA"
+        model = ProXYZForCausalLM(config)
+        attn_type = f"U-Net (AA:{config.aa_encoder_layers}+BPE:{config.bpe_encoder_layers}+AA:{config.aa_decoder_layers})"
+    else:
+        # --- Standard causal LM ---
+        common_config = dict(
+            vocab_size=vocab_size,
+            hidden_size=args.model_hidden_size,
+            intermediate_size=args.model_intermediate_size,
+            num_hidden_layers=args.model_num_hidden_layers,
+            num_attention_heads=args.model_num_attention_heads,
+            max_position_embeddings=args.max_position_embeddings,
+            initializer_range=0.02,
+            rms_norm_eps=1e-6,
+            pad_token_id=tokenizer.pad_token_id,
+            bos_token_id=tokenizer.bos_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+            attn_implementation=args.attn_implementation,
+            torch_dtype=torch.bfloat16,
+            tie_word_embeddings=False,
+        )
+
+        if args.use_mla:
+            config = DeepseekV2Config(
+                **common_config,
+                kv_lora_rank=args.kv_lora_rank,
+                q_lora_rank=args.q_lora_rank,
+                qk_nope_head_dim=args.qk_nope_head_dim,
+                qk_rope_head_dim=args.qk_rope_head_dim,
+                v_head_dim=args.v_head_dim,
+            )
+            model = DeepseekV2ForCausalLM(config)
+            attn_type = "MLA (DeepSeek-V2)"
+        else:
+            config = LlamaConfig(
+                **common_config,
+                num_key_value_heads=args.model_num_key_value_heads,
+                hidden_act="silu",
+            )
+            model = LlamaForCausalLM(config)
+            attn_type = "Llama GQA"
 
     # Ensure all parameters are bf16 — FlashAttention requires fp16 or bf16
     use_cuda = torch.cuda.is_available()
@@ -360,6 +424,31 @@ def main(**args):
         return new_ids
 
     def tokenize_function(examples):
+        # ---- U-Net path: AA-level inputs + BPE alignment ----
+        if args.unet:
+            from proxyz.processor import ProXYZProcessor
+            processor = ProXYZProcessor(tokenizer, pad_token_id=tokenizer.pad_token_id)
+            batch_aa, batch_bpe, batch_align, batch_mask, batch_labels = [], [], [], [], []
+            for text in examples[args.text_column]:
+                out = processor(text, mode="unet", max_length=max_len)
+                aa_ids = out["aa_input_ids"]
+                if not aa_ids:
+                    continue
+                # Labels: next amino acid (shift by 1)
+                labels = aa_ids[1:] + [-100]  # last position: nothing to predict
+                labels[0] = -100
+                batch_aa.append(aa_ids)
+                batch_bpe.append(out["bpe_input_ids"])
+                batch_align.append(out["alignments"])
+                batch_mask.append(out["attention_mask"])
+                batch_labels.append(labels)
+            return {
+                "aa_input_ids": batch_aa, "bpe_input_ids": batch_bpe,
+                "alignments": batch_align, "attention_mask": batch_mask,
+                "labels": batch_labels,
+            }
+
+        # ---- Standard path ----
         do_fim = random.random() < args.fim_rate
 
         if do_fim and args.fim_text:
@@ -511,20 +600,45 @@ def main(**args):
     # Data collator that pads input_ids, attention_mask, and labels uniformly
     pad_token_id = tokenizer.pad_token_id
 
-    def data_collator(examples):
-        max_len = max(len(ex["input_ids"]) for ex in examples)
-        input_ids, attention_mask, labels = [], [], []
-        for ex in examples:
-            pad_len = max_len - len(ex["input_ids"])
-            input_ids.append(ex["input_ids"] + [pad_token_id] * pad_len)
-            attention_mask.append(ex["attention_mask"] + [0] * pad_len)
-            label_seq = ex.get("labels", ex["input_ids"])
-            labels.append(label_seq + [-100] * pad_len)
-        return {
-            "input_ids": torch.tensor(input_ids, dtype=torch.long),
-            "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
-            "labels": torch.tensor(labels, dtype=torch.long),
-        }
+    if args.unet:
+        def data_collator(examples):
+            max_aa = max(len(ex["aa_input_ids"]) for ex in examples)
+            max_bpe = max(len(ex["bpe_input_ids"]) for ex in examples)
+            aa_ids, bpe_ids, aligns, masks, labels = [], [], [], [], []
+            for ex in examples:
+                pad_aa = max_aa - len(ex["aa_input_ids"])
+                pad_bpe = max_bpe - len(ex["bpe_input_ids"])
+                aa_ids.append(ex["aa_input_ids"] + [0] * pad_aa)
+                bpe_ids.append(ex["bpe_input_ids"] + [pad_token_id] * pad_bpe)
+                aligns.append(ex["alignments"] + [[0, 0]] * pad_bpe)
+                masks.append(ex["attention_mask"] + [0] * pad_aa)
+                labels.append(ex["labels"] + [-100] * pad_aa)
+            return {
+                "aa_input_ids": torch.tensor(aa_ids, dtype=torch.long),
+                "bpe_input_ids": torch.tensor(bpe_ids, dtype=torch.long),
+                "alignments": torch.tensor(aligns, dtype=torch.long),
+                "aa_attention_mask": torch.tensor(masks, dtype=torch.long),
+                "bpe_attention_mask": torch.tensor(
+                    [[1] * len(ex["bpe_input_ids"]) + [0] * (max_bpe - len(ex["bpe_input_ids"])) for ex in examples],
+                    dtype=torch.long,
+                ),
+                "labels": torch.tensor(labels, dtype=torch.long),
+            }
+    else:
+        def data_collator(examples):
+            max_len = max(len(ex["input_ids"]) for ex in examples)
+            input_ids, attention_mask, labels = [], [], []
+            for ex in examples:
+                pad_len = max_len - len(ex["input_ids"])
+                input_ids.append(ex["input_ids"] + [pad_token_id] * pad_len)
+                attention_mask.append(ex["attention_mask"] + [0] * pad_len)
+                label_seq = ex.get("labels", ex["input_ids"])
+                labels.append(label_seq + [-100] * pad_len)
+            return {
+                "input_ids": torch.tensor(input_ids, dtype=torch.long),
+                "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
+                "labels": torch.tensor(labels, dtype=torch.long),
+            }
 
     # ==========================================
     # 4. TRAINING ARGUMENTS & EXECUTION

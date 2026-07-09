@@ -145,6 +145,12 @@ from proxyz.data import dataset
     "--gradient_accumulation_steps", type=int, default=8, help="Grad accumulation steps."
 )
 @click.option("--learning_rate", type=float, default=3e-4, help="Peak learning rate.")
+@click.option(
+    "--warmup_steps",
+    type=int,
+    default=0,
+    help="Number of steps for a linear warmup from 0 to `learning_rate`."
+)
 @click.option("--weight_decay", type=float, default=0.1, help="Weight decay.")
 @click.option("--num_train_epochs", type=float, default=3.0, help="Training epochs.")
 @click.option(
@@ -223,9 +229,17 @@ from proxyz.data import dataset
     help="Clustering files for cluster-based sampling. Each file has two columns: "
     "cluster_id and data_row_id. Sampling weight = n / (1 + log(n)) where n is cluster size.",
 )
+@click.option(
+    "--random_seed",
+    type=float,
+    default=None,
+    help="Initializes the underlying pseudo-random number generator (PRNG).",
+)
 @click.option("-v", "--verbose", is_flag=True, help="verbose output.")
 def main(**args):
     args = dict2object(**args)
+
+    random.seed(args.random_seed)
 
     # ==========================================
     # 0. CHECK DATA SOURCE IS PROVIDED
@@ -626,6 +640,7 @@ def main(**args):
         per_device_train_batch_size=args.per_device_train_batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         learning_rate=args.learning_rate,
+        warmup_steps=args.warmup_steps,
         weight_decay=args.weight_decay,
         adam_beta1=0.9,
         adam_beta2=0.95,                              # DeepSeek beta2 standard

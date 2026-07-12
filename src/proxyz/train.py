@@ -183,12 +183,6 @@ from proxyz.data import dataset
     "Remaining use PSM format (prefix-suffix-middle).",
 )
 @click.option(
-    "--fim_text",
-    is_flag=True,
-    help="Construct FIM format at text level before tokenizing (matches inference). "
-    "Default: tokenize first, then rearrange token IDs for FIM.",
-)
-@click.option(
     "--eval_strategy",
     type=click.Choice(["no", "steps", "epoch"]),
     default="steps",
@@ -337,13 +331,9 @@ def main(**args):
     # ==========================================
     max_len = config.max_position_embeddings
 
-    def apply_fim(content, is_text=False):
+    def apply_fim(content):
         """Split content into prefix/middle/suffix and rearrange for FIM training.
         Prefix or suffix may be empty, but middle is always non-empty."""
-        if not is_text:
-            assert content[0] == tokenizer.bos_token_id and content[-1] == tokenizer.eos_token_id
-            content = content[1:-1]
-
         n = len(content)
         cut1 = random.randint(0, n - 1)
         cut2 = random.randint(cut1 + 1, n)
@@ -359,25 +349,11 @@ def main(**args):
             first_tag, second_tag = dataset.FIM_PREFIX, dataset.FIM_SUFFIX
             first, second = prefix, suffix
 
-        if is_text:
-            return first_tag + first + second_tag + second + dataset.FIM_MIDDLE + middle
-
-        new_ids = (
-            [tokenizer.bos_token_id, tokenizer.convert_tokens_to_ids(first_tag)]
-            + first
-            + [tokenizer.convert_tokens_to_ids(second_tag)]
-            + second
-            + [tokenizer.convert_tokens_to_ids(dataset.FIM_MIDDLE)]
-            + middle
-            + [tokenizer.eos_token_id]
-        )
-        return new_ids
+        return first_tag + first + second_tag + second + dataset.FIM_MIDDLE + middle
 
     def tokenize_function(examples):
-        do_fim = random.random() < args.fim_rate
-
-        if do_fim and args.fim_text:
-            text_process_fn = functools.partial(apply_fim, is_text=True)
+        if random.random() < args.fim_rate:
+            text_process_fn = apply_fim
         else:
             text_process_fn = lambda x: x
 
@@ -385,40 +361,16 @@ def main(**args):
             f"{tokenizer.bos_token}{text_process_fn(text)}{tokenizer.eos_token}"
             for text in examples[args.text_column]
         ]
-        tokenized = tokenizer(wrapped, truncation=True, max_length=max_len)
-
-        batch_input_ids = []
-        batch_attention_mask = []
-        batch_labels = []
-
-        for i, ids in enumerate(tokenized["input_ids"]):
-            # Apply FIM transformation with probability fim_rate (need ≥5 tokens)
-            if do_fim:
-                if args.fim_text:
-                    batch_attention_mask.append(tokenized["attention_mask"][i])
-                else:
-                    ids = apply_fim(ids)
-                    batch_attention_mask.append([1] * len(ids))
-                batch_input_ids.append(ids)
-                k = ids.index(tokenizer.convert_tokens_to_ids(dataset.FIM_MIDDLE)) + 1
-                batch_labels.append([-100] * k + ids[k:])
-            else:
-                batch_input_ids.append(ids)
-                batch_attention_mask.append(tokenized["attention_mask"][i])
-                batch_labels.append(ids.copy())
-
-        tokenized["input_ids"] = batch_input_ids
-        tokenized["attention_mask"] = batch_attention_mask
-        tokenized["labels"] = batch_labels
-
-        # Random crop sequences longer than max_token_length (for non-FIM examples)
-        if args.max_token_length:
-            for i, ids in enumerate(tokenized["input_ids"]):
-                if len(ids) > args.max_token_length:
-                    start = random.randint(0, len(ids) - args.max_token_length)
-                    tokenized["input_ids"][i] = ids[start:start + args.max_token_length]
-                    tokenized["attention_mask"][i] = tokenized["attention_mask"][i][start:start + args.max_token_length]
-                    tokenized["labels"][i] = tokenized["labels"][i][start:start + args.max_token_length]
+        tokenized = tokenizer(
+            wrapped,
+            truncation=True,
+            return_tensors="pt",
+            padding=True,
+            max_length=max_len
+        )
+        tokenized["labels"] = tokenized["input_ids"].where(
+            tokenized["attention_mask"] > 0, -100
+        )
 
         return tokenized
 
@@ -458,10 +410,8 @@ def main(**args):
             )
 
     # Apply tokenization
-    text_col = args.text_column if args.dataset_name else "text"
-
     def tokenize_dataset(dataset):
-        return dataset.map(tokenize_function, batched=True, remove_columns=[text_col])
+        return dataset.with_transform(tokenize_function)
 
     train_dataset = tokenize_dataset(train_dataset)
     if eval_dataset:
@@ -522,23 +472,6 @@ def main(**args):
             print(f"Clusters: {len(cluster_sizes):,}")
             print(f"Samples with cluster info: {sum(1 for w in sample_weights if w != 1.0):,}")
 
-    # Data collator that pads input_ids, attention_mask, and labels uniformly
-    pad_token_id = tokenizer.pad_token_id
-
-    def data_collator(examples):
-        max_len = max(len(ex["input_ids"]) for ex in examples)
-        input_ids, attention_mask, labels = [], [], []
-        for ex in examples:
-            pad_len = max_len - len(ex["input_ids"])
-            input_ids.append(ex["input_ids"] + [pad_token_id] * pad_len)
-            attention_mask.append(ex["attention_mask"] + [0] * pad_len)
-            label_seq = ex.get("labels", ex["input_ids"])
-            labels.append(label_seq + [-100] * pad_len)
-        return {
-            "input_ids": torch.tensor(input_ids, dtype=torch.long),
-            "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
-            "labels": torch.tensor(labels, dtype=torch.long),
-        }
 
     # ==========================================
     # 4. TRAINING ARGUMENTS & EXECUTION
@@ -612,7 +545,9 @@ def main(**args):
             logs = {}
             with torch.no_grad():
                 # Detect FIM examples: labels start with -100
-                is_fim = labels[:, 0] == -100
+                is_fim = (
+                    labels == tokenizer.convert_tokens_to_ids(dataset.FIM_MIDDLE)
+                ).any(1)
 
                 for tag, mask in [("fim", is_fim), ("std", ~is_fim)]:
                     # Add FIM/standard counts to logs
@@ -654,6 +589,7 @@ def main(**args):
         num_train_epochs=args.num_train_epochs,
         max_steps=args.max_steps,
         dataloader_num_workers=args.dataloader_num_workers,
+        remove_unused_columns=False,
         report_to=report_to,                          # SwanLab + TensorBoard
         run_name=args.run_name,
     )
@@ -663,7 +599,6 @@ def main(**args):
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        data_collator=data_collator,
         processing_class=tokenizer,                  # transformers >=5 renamed `tokenizer`
         train_sampler=train_sampler,
         preprocess_logits_for_metrics=FIMTrainer.aux_preprocess_logits_for_metrics,

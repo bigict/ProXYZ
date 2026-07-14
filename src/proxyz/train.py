@@ -66,6 +66,14 @@ from proxyz.data import dataset
     help="Path to the tokenizer json file.",
 )
 @click.option(
+    "--tokenizer_bpe_dropout",
+    type=float,
+    default=0,
+    help="Stochastic BPE, typically implemented as BPE-Dropout, is a subword "
+    "regularization method that randomly drops valid subword merges during "
+    "tokenization.",
+)
+@click.option(
     "--data_format",
     type=click.Choice(["line", "fasta"]),
     default="line",
@@ -259,6 +267,9 @@ def main(**args):
         bos_token="[BOS]",
         eos_token="[EOS]",
     )
+    if args.tokenizer_bpe_dropout > 0:
+        # FIXME: Turn it Off (0.0) for evaluation
+        tokenizer.backend_tokenizer.model.dropout = args.tokenizer_bpe_dropout
 
     # Add FIM special tokens if FIM training is enabled
     if args.fim_rate > 0:

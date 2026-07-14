@@ -10,16 +10,15 @@ from torch.utils.data import WeightedRandomSampler
 from transformers import (
     LlamaConfig,
     LlamaForCausalLM,
-    DeepseekV2Config,
-    DeepseekV2ForCausalLM,
     PreTrainedTokenizerFast,
     Trainer,
     TrainingArguments,
 )
 from datasets import Dataset, load_dataset
 
-from proxyz.utils import dict2object, compose
 from proxyz.data import dataset
+from proxyz.models import XYZConfig, XYZForCausalLM, XYZProcessor
+from proxyz.utils import dict2object, compose
 
 
 @click.command(context_settings={'show_default': True})
@@ -97,39 +96,33 @@ from proxyz.data import dataset
     help="Model Grouped-Query Attention (GQA) for speed.",
 )
 @click.option(
-    "--use_mla",
+    "--use_unet",
     is_flag=True,
-    help="Use Multi-head Latent Attention (MLA) from DeepSeek-V2 instead of standard Llama attention.",
+    help="Use U-net style XYZForCausalLM instead of standard Llama attention.",
 )
 @click.option(
-    "--kv_lora_rank",
+    "--char_hidden_size",
     type=int,
-    default=512,
-    help="MLA: Rank for KV low-rank compression.",
+    default=768,
+    help="Character: Model width.",
 )
 @click.option(
-    "--q_lora_rank",
+    "--char_intermediate_size",
     type=int,
-    default=0,
-    help="MLA: Rank for Q low-rank compression (0 to disable).",
+    default=2064,
+    help="Character: Model SwiGLU hidden dimension (usually ~8/3 of hidden_size).",
 )
 @click.option(
-    "--qk_nope_head_dim",
+    "--char_num_hidden_layers",
     type=int,
-    default=128,
-    help="MLA: Dimension of non-RoPE part in Q/K heads.",
+    default=2,
+    help="Character: Model depth.",
 )
 @click.option(
-    "--qk_rope_head_dim",
+    "--char_num_attention_heads",
     type=int,
-    default=64,
-    help="MLA: Dimension of RoPE part in Q/K heads.",
-)
-@click.option(
-    "--v_head_dim",
-    type=int,
-    default=128,
-    help="MLA: Dimension of V heads.",
+    default=6,
+    help="Character: Model attention heads.",
 )
 @click.option(
     "--max_position_embeddings", type=int, default=4096, help="Context window length."
@@ -272,15 +265,7 @@ def main(**args):
         bos_token="[BOS]",
         eos_token="[EOS]",
     )
-    if args.tokenizer_bpe_dropout > 0:
-        # FIXME: Turn it Off (0.0) for evaluation
-        tokenizer.backend_tokenizer.model.dropout = args.tokenizer_bpe_dropout
-
-    # Add FIM special tokens if FIM training is enabled
-    if args.fim_rate > 0:
-        fim_tokens = dataset.FIM_TOKENS
-        tokenizer.add_special_tokens({"additional_special_tokens": fim_tokens})
-        print(f"Added FIM tokens: {fim_tokens} (vocab size: {len(tokenizer)})")
+    processor = XYZProcessor(tokenizer=tokenizer)
 
     # Ensure the embedding layer matches this size exactly
     vocab_size = len(tokenizer)
@@ -297,7 +282,9 @@ def main(**args):
         intermediate_size=args.model_intermediate_size,
         num_hidden_layers=args.model_num_hidden_layers,
         num_attention_heads=args.model_num_attention_heads,
+        num_key_value_heads=args.model_num_key_value_heads,
         max_position_embeddings=args.max_position_embeddings,
+        hidden_act="silu",
         initializer_range=0.02,
         rms_norm_eps=1e-6,
         pad_token_id=tokenizer.pad_token_id,
@@ -306,27 +293,25 @@ def main(**args):
         attn_implementation=args.attn_implementation,
         torch_dtype=torch.bfloat16,
         tie_word_embeddings=False,
+        keys_to_ignore_at_inference=[
+            "char_logits", "past_key_values", "char_past_key_values"
+        ],
     )
 
-    if args.use_mla:
-        config = DeepseekV2Config(
+    if args.use_unet:
+        config = XYZConfig(
             **common_config,
-            kv_lora_rank=args.kv_lora_rank,
-            q_lora_rank=args.q_lora_rank,
-            qk_nope_head_dim=args.qk_nope_head_dim,
-            qk_rope_head_dim=args.qk_rope_head_dim,
-            v_head_dim=args.v_head_dim,
+            char_hidden_size=args.char_hidden_size,
+            char_intermediate_size=args.char_intermediate_size,
+            char_num_hidden_layers=args.char_num_hidden_layers,
+            char_num_attention_heads=args.char_num_attention_heads,
         )
-        model = DeepseekV2ForCausalLM(config)
-        attn_type = "MLA (DeepSeek-V2)"
+        model = XYZForCausalLM(config)
     else:
         config = LlamaConfig(
             **common_config,
-            num_key_value_heads=args.model_num_key_value_heads,
-            hidden_act="silu",
         )
         model = LlamaForCausalLM(config)
-        attn_type = "Llama GQA"
 
     # Ensure all parameters are bf16 — FlashAttention requires fp16 or bf16
     use_cuda = torch.cuda.is_available()
@@ -337,7 +322,6 @@ def main(**args):
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"--- Dense DeepSeek-Style Model ---")
-        print(f"Attention:           {attn_type}")
         print(f"Attention backend:   {args.attn_implementation}")
         print(f"Total Parameters:    {total_params:,}")
         print(f"Trainable Parameters: {trainable_params:,}")
@@ -345,71 +329,22 @@ def main(**args):
     # ==========================================
     # 3. PREPARE YOUR DATASET
     # ==========================================
-    def apply_crop(text, max_length):
-        if len(text) > max_length:
-            cut = random.randint(0, len(text) - max_length)
-            text = text[cut: cut + max_length]
-        return text
-
-    def apply_fim(content):
-        """Split content into prefix/middle/suffix and rearrange for FIM training.
-        Prefix or suffix may be empty, but middle is always non-empty."""
-        n = len(content)
-        cut1 = random.randint(0, n - 1)
-        cut2 = random.randint(cut1 + 1, n)
-        prefix, middle, suffix = content[:cut1], content[cut1:cut2], content[cut2:]
-
-        is_spm = random.random() < args.fim_spm_rate
-        if is_spm:
-            # SPM: <BOS><fim_suffix><suffix><fim_prefix><prefix><fim_middle><middle><EOS>
-            first_tag, second_tag = dataset.FIM_SUFFIX, dataset.FIM_PREFIX
-            first, second = suffix, prefix
-        else:
-            # PSM: <BOS><fim_prefix><prefix><fim_suffix><suffix><fim_middle><middle><EOS>
-            first_tag, second_tag = dataset.FIM_PREFIX, dataset.FIM_SUFFIX
-            first, second = prefix, suffix
-
-        return first_tag + first + second_tag + second + dataset.FIM_MIDDLE + middle
-
     max_sequence_length = args.max_sequence_length
     if max_sequence_length is None:
         max_sequence_length = args.max_position_embeddings
 
     def tokenize_function(examples):
-        do_fim = random.random() < args.fim_rate
-
-        if do_fim:
-            text_process_fn = compose(
-                apply_fim,
-                functools.partial(apply_crop, max_length=max_sequence_length - 5)
-            )
-        else:
-            text_process_fn = compose(
-                functools.partial(apply_crop, max_length=max_sequence_length - 2)
-            )
-
-        wrapped = [
-            f"{tokenizer.bos_token}{text_process_fn(text)}{tokenizer.eos_token}"
-            for text in examples[args.text_column]
-        ]
-        tokenized = tokenizer(
-            wrapped,
-            truncation=True,
-            return_tensors="pt",
-            padding=True,
+        fim_apply = random.random() < args.fim_rate
+        examples = processor(
+            examples[args.text_column],
+            bpe_dropout=args.tokenizer_bpe_dropout,
+            char_apply=args.use_unet,
+            fim_apply=fim_apply,
+            fim_spm_rate=args.fim_spm_rate,
+            fim_sft_style=args.fim_sft_style,
+            max_length=max_sequence_length - (5 if fim_apply else 2),
         )
-        tokenized["labels"] = tokenized["input_ids"].where(
-            tokenized["attention_mask"] > 0, -100
-        )
-        if do_fim and args.fim_sft_style:
-            middle_pos = (
-                tokenized["labels"] == tokenizer.convert_tokens_to_ids(dataset.FIM_MIDDLE)
-            ).cumsum(1)
-            tokenized["labels"] = tokenized["labels"].where(
-                middle_pos.cumsum(1) > 1, -100  # the <fim_middle> is excluded
-            )
-
-        return tokenized
+        return examples
 
     # Load dataset from HuggingFace or local files
     if args.dataset_name:
@@ -582,9 +517,12 @@ def main(**args):
             logs = {}
             with torch.no_grad():
                 # Detect FIM examples: labels start with -100
-                is_fim = (
-                    labels == tokenizer.convert_tokens_to_ids(dataset.FIM_MIDDLE)
-                ).any(1)
+                if args.fim_sft_style:
+                    is_fim = (labels[..., 0] == -100)
+                else:
+                    is_fim = (
+                        labels == processor.tokenizer.convert_tokens_to_ids(processor.FIM_MIDDLE)
+                    ).any(1)
 
                 for tag, mask in [("fim", is_fim), ("std", ~is_fim)]:
                     # Add FIM/standard counts to logs
@@ -621,6 +559,7 @@ def main(**args):
         eval_strategy=args.eval_strategy if (args.eval_files or args.dataset_eval_split) else "no",
         eval_steps=args.eval_steps if args.eval_strategy == "steps" else None,
         eval_accumulation_steps=args.gradient_accumulation_steps,
+        label_names=["labels"],
         bf16=use_cuda,                                # bf16 is preferred over fp16 on modern GPUs
         ddp_find_unused_parameters=False,             # disabled warning
         num_train_epochs=args.num_train_epochs,
@@ -636,7 +575,7 @@ def main(**args):
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        processing_class=tokenizer,                  # transformers >=5 renamed `tokenizer`
+        processing_class=processor,                  # transformers >=5 renamed `tokenizer`
         train_sampler=train_sampler,
         preprocess_logits_for_metrics=FIMTrainer.aux_preprocess_logits_for_metrics,
         compute_metrics=FIMTrainer.aux_metric_calculator,
@@ -675,7 +614,7 @@ def main(**args):
 
     # Save final weights and configuration
     trainer.save_model(args.output_dir)
-    tokenizer.save_pretrained(args.output_dir)
+    processor.save_pretrained(args.output_dir)
 
     # Clean up distributed process group to avoid resource leaks
     if torch.distributed.is_initialized():

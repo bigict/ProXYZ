@@ -10,22 +10,21 @@ from torch.utils.data import WeightedRandomSampler
 from transformers import (
     LlamaConfig,
     LlamaForCausalLM,
-    DeepseekV2Config,
-    DeepseekV2ForCausalLM,
     PreTrainedTokenizerFast,
     Trainer,
     TrainingArguments,
 )
 from datasets import Dataset, load_dataset
 
-from proxyz.utils import dict2object, compose
 from proxyz.data import dataset, sampler
+from proxyz.models import XYZConfig, XYZForCausalLM, XYZProcessor
+from proxyz.utils import dict2object, compose
 
 
 @click.command(context_settings={'show_default': True})
 @click.argument("data_files", type=click.Path(), nargs=-1)
 @click.option(
-    "--eval_files", type=click.Path(), multiple=True, help="evaluate data files"
+    "--eval_files", type=click.Path(), multiple=True, help="Evaluate data files"
 )
 @click.option(
     "--dataset_name",
@@ -97,39 +96,53 @@ from proxyz.data import dataset, sampler
     help="Model Grouped-Query Attention (GQA) for speed.",
 )
 @click.option(
-    "--use_mla",
+    "--use_unet",
     is_flag=True,
-    help="Use Multi-head Latent Attention (MLA) from DeepSeek-V2 instead of standard Llama attention.",
+    help="Use U-net style XYZForCausalLM instead of standard Llama attention.",
 )
 @click.option(
-    "--kv_lora_rank",
+    "--model_char_hidden_size",
     type=int,
-    default=512,
-    help="MLA: Rank for KV low-rank compression.",
+    default=768,
+    help="Character: Model width.",
 )
 @click.option(
-    "--q_lora_rank",
+    "--model_char_intermediate_size",
     type=int,
-    default=0,
-    help="MLA: Rank for Q low-rank compression (0 to disable).",
+    default=2064,
+    help="Character: Model SwiGLU hidden dimension (usually ~8/3 of hidden_size).",
 )
 @click.option(
-    "--qk_nope_head_dim",
+    "--model_char_num_hidden_layers",
     type=int,
-    default=128,
-    help="MLA: Dimension of non-RoPE part in Q/K heads.",
+    default=2,
+    help="Character: Model depth.",
 )
 @click.option(
-    "--qk_rope_head_dim",
+    "--model_char_num_attention_heads",
     type=int,
-    default=64,
-    help="MLA: Dimension of RoPE part in Q/K heads.",
+    default=6,
+    help="Character: Model attention heads.",
 )
 @click.option(
-    "--v_head_dim",
-    type=int,
-    default=128,
-    help="MLA: Dimension of V heads.",
+    "--model_use_char_position_ids",
+    is_flag=True,
+    help="Character: Model gather position_ids from char_position_ids",
+)
+@click.option(
+    "--model_has_char_lm_head",
+    is_flag=True,
+    help="Character: Model has char_lm_head",
+)
+@click.option(
+    "--model_has_cle_lm_head",
+    is_flag=True,
+    help="Character: Model has cle_lm_head",
+)
+@click.option(
+    "--model_has_distogram_lm_head",
+    is_flag=True,
+    help="Character: Model has distogram_lm_head",
 )
 @click.option(
     "--max_position_embeddings", type=int, default=4096, help="Context window length."
@@ -150,7 +163,10 @@ from proxyz.data import dataset, sampler
     "--per_device_train_batch_size", type=int, default=4, help="Per-device batch size."
 )
 @click.option(
-    "--gradient_accumulation_steps", type=int, default=8, help="Grad accumulation steps."
+    "--gradient_accumulation_steps",
+    type=int,
+    default=8,
+    help="Grad accumulation steps."
 )
 @click.option("--learning_rate", type=float, default=3e-4, help="Peak learning rate.")
 @click.option(
@@ -201,9 +217,14 @@ from proxyz.data import dataset, sampler
     default="steps",
     help="When to run validation: 'steps' (every eval_steps), 'epoch' (end of each epoch), or 'no'.",
 )
-@click.option("--eval_steps", type=int, default=500, help="Run validation every N steps.")
 @click.option(
-    "--dataloader_num_workers", type=int, default=4, help="Dataloader worker processes."
+    "--eval_steps", type=int, default=500, help="Run validation every N steps."
+)
+@click.option(
+    "--dataloader_num_workers",
+    type=int,
+    default=4,
+    help="Dataloader worker processes."
 )
 @click.option(
     "--report_to",
@@ -248,6 +269,24 @@ def main(**args):
 
     random.seed(args.random_seed)
 
+    features = []
+    label_names = [("labels", 1)]
+    keys_to_ignore_at_inference = ["past_key_values", "char_past_key_values"]
+    if args.model_has_char_lm_head:
+        label_names += [("char_labels", 1)]
+    else:
+        keys_to_ignore_at_inference += ["char_logits"]
+    if args.model_has_cle_lm_head:
+        label_names += [("cle_labels", 0)]
+        features += ["cle_labels"]
+    else:
+        keys_to_ignore_at_inference += ["cle_logits"]
+    if args.model_has_distogram_lm_head:
+        label_names += [("distogram_labels", 0)]
+        features += ["distogram_labels"]
+    else:
+        keys_to_ignore_at_inference += ["distogram_logits"]
+
     # ==========================================
     # 0. CHECK DATA SOURCE IS PROVIDED
     # ==========================================
@@ -272,15 +311,11 @@ def main(**args):
         bos_token="[BOS]",
         eos_token="[EOS]",
     )
-    if args.tokenizer_bpe_dropout > 0:
-        # FIXME: Turn it Off (0.0) for evaluation
-        tokenizer.backend_tokenizer.model.dropout = args.tokenizer_bpe_dropout
-
-    # Add FIM special tokens if FIM training is enabled
-    if args.fim_rate > 0:
-        fim_tokens = dataset.FIM_TOKENS
-        tokenizer.add_special_tokens({"additional_special_tokens": fim_tokens})
-        print(f"Added FIM tokens: {fim_tokens} (vocab size: {len(tokenizer)})")
+    processor = XYZProcessor(
+        tokenizer=tokenizer,
+        text_column=args.text_column,
+        features=features,
+    )
 
     # Ensure the embedding layer matches this size exactly
     vocab_size = len(tokenizer)
@@ -297,7 +332,9 @@ def main(**args):
         intermediate_size=args.model_intermediate_size,
         num_hidden_layers=args.model_num_hidden_layers,
         num_attention_heads=args.model_num_attention_heads,
+        num_key_value_heads=args.model_num_key_value_heads,
         max_position_embeddings=args.max_position_embeddings,
+        hidden_act="silu",
         initializer_range=0.02,
         rms_norm_eps=1e-6,
         pad_token_id=tokenizer.pad_token_id,
@@ -306,27 +343,25 @@ def main(**args):
         attn_implementation=args.attn_implementation,
         torch_dtype=torch.bfloat16,
         tie_word_embeddings=False,
+        keys_to_ignore_at_inference=keys_to_ignore_at_inference
     )
 
-    if args.use_mla:
-        config = DeepseekV2Config(
+    if args.use_unet:
+        config = XYZConfig(
             **common_config,
-            kv_lora_rank=args.kv_lora_rank,
-            q_lora_rank=args.q_lora_rank,
-            qk_nope_head_dim=args.qk_nope_head_dim,
-            qk_rope_head_dim=args.qk_rope_head_dim,
-            v_head_dim=args.v_head_dim,
+            char_hidden_size=args.model_char_hidden_size,
+            char_intermediate_size=args.model_char_intermediate_size,
+            char_num_hidden_layers=args.model_char_num_hidden_layers,
+            char_num_attention_heads=args.model_char_num_attention_heads,
+            use_char_position_ids=args.model_use_char_position_ids,
+            has_char_lm_head=args.model_has_char_lm_head,
+            has_cle_lm_head=args.model_has_cle_lm_head,
+            has_distogram_lm_head=args.model_has_distogram_lm_head,
         )
-        model = DeepseekV2ForCausalLM(config)
-        attn_type = "MLA (DeepSeek-V2)"
+        model = XYZForCausalLM(config)
     else:
-        config = LlamaConfig(
-            **common_config,
-            num_key_value_heads=args.model_num_key_value_heads,
-            hidden_act="silu",
-        )
+        config = LlamaConfig(**common_config, )
         model = LlamaForCausalLM(config)
-        attn_type = "Llama GQA"
 
     # Ensure all parameters are bf16 — FlashAttention requires fp16 or bf16
     use_cuda = torch.cuda.is_available()
@@ -337,7 +372,6 @@ def main(**args):
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"--- Dense DeepSeek-Style Model ---")
-        print(f"Attention:           {attn_type}")
         print(f"Attention backend:   {args.attn_implementation}")
         print(f"Total Parameters:    {total_params:,}")
         print(f"Trainable Parameters: {trainable_params:,}")
@@ -345,74 +379,24 @@ def main(**args):
     # ==========================================
     # 3. PREPARE YOUR DATASET
     # ==========================================
-    def apply_crop(text, max_length):
-        if len(text) > max_length:
-            cut = random.randint(0, len(text) - max_length)
-            text = text[cut: cut + max_length]
-        return text
-
-    def apply_fim(content):
-        """Split content into prefix/middle/suffix and rearrange for FIM training.
-        Prefix or suffix may be empty, but middle is always non-empty."""
-        n = len(content)
-        cut1 = random.randint(0, n - 1)
-        cut2 = random.randint(cut1 + 1, n)
-        prefix, middle, suffix = content[:cut1], content[cut1:cut2], content[cut2:]
-
-        is_spm = random.random() < args.fim_spm_rate
-        if is_spm:
-            # SPM: <BOS><fim_suffix><suffix><fim_prefix><prefix><fim_middle><middle><EOS>
-            first_tag, second_tag = dataset.FIM_SUFFIX, dataset.FIM_PREFIX
-            first, second = suffix, prefix
-        else:
-            # PSM: <BOS><fim_prefix><prefix><fim_suffix><suffix><fim_middle><middle><EOS>
-            first_tag, second_tag = dataset.FIM_PREFIX, dataset.FIM_SUFFIX
-            first, second = prefix, suffix
-
-        return first_tag + first + second_tag + second + dataset.FIM_MIDDLE + middle
-
     max_sequence_length = args.max_sequence_length
     if max_sequence_length is None:
         max_sequence_length = args.max_position_embeddings
 
     def tokenize_function(examples):
-        do_fim = random.random() < args.fim_rate
-
+        fim_apply = random.random() < args.fim_rate
         if args.data_format == "pdb":
-            examples = dataset.pdb_transform(os.environ["DATA_DIR"], examples)
-
-        if do_fim:
-            text_process_fn = compose(
-                apply_fim,
-                functools.partial(apply_crop, max_length=max_sequence_length - 5)
-            )
-        else:
-            text_process_fn = compose(
-                functools.partial(apply_crop, max_length=max_sequence_length - 2)
-            )
-
-        wrapped = [
-            f"{tokenizer.bos_token}{text_process_fn(text)}{tokenizer.eos_token}"
-            for text in examples[args.text_column]
-        ]
-        tokenized = tokenizer(
-            wrapped,
-            truncation=True,
-            return_tensors="pt",
-            padding=True,
+            examples = dataset.pdb_transform(os.environ["DATA_PATH"], examples)
+        examples = processor(
+            examples,
+            bpe_dropout=args.tokenizer_bpe_dropout,
+            char_apply=args.use_unet,
+            fim_apply=fim_apply,
+            fim_spm_rate=args.fim_spm_rate,
+            fim_sft_style=args.fim_sft_style,
+            max_length=max_sequence_length - (5 if fim_apply else 2),
         )
-        tokenized["labels"] = tokenized["input_ids"].where(
-            tokenized["attention_mask"] > 0, -100
-        )
-        if do_fim and args.fim_sft_style:
-            middle_pos = (
-                tokenized["labels"] == tokenizer.convert_tokens_to_ids(dataset.FIM_MIDDLE)
-            ).cumsum(1)
-            tokenized["labels"] = tokenized["labels"].where(
-                middle_pos.cumsum(1) > 1, -100  # the <fim_middle> is excluded
-            )
-
-        return tokenized
+        return examples
 
     # Load dataset from HuggingFace or local files
     if args.dataset_name:
@@ -471,7 +455,6 @@ def main(**args):
             print(f"--- Eval dataset ---")
             print(f"Examples: {len(eval_dataset):,}")
 
-
     # ==========================================
     # 4. TRAINING ARGUMENTS & EXECUTION
     # ==========================================
@@ -483,31 +466,53 @@ def main(**args):
 
             self.train_sampler = train_sampler
             self._logs = {}
-        
+
         def _get_train_sampler(self, train_dataset: Dataset = None):
             if self.train_sampler is not None:
                 return self.train_sampler
             return super()._get_train_sampler(train_dataset)
-        
+
         def compute_loss(
             self, model, inputs, return_outputs=False, num_items_in_batch=None
         ):
             # Always cache data for FIM loss tracking (training and eval)
             # Cache data BEFORE calling super (which may modify inputs)
-            labels = inputs["labels"].clone()
+            labels = tuple(inputs[k].clone() for k in self.args.label_names)
+            if len(labels) == 1:
+                labels = labels[0]
 
             # Call parent compute_loss (handles label smoothing, loss scaling, etc.)
             loss, outputs = super().compute_loss(
-                model, inputs, return_outputs=True, num_items_in_batch=num_items_in_batch
+                model,
+                inputs,
+                return_outputs=True,
+                num_items_in_batch=num_items_in_batch
             )
 
             # ONLY track training metrics if the model is actively training
-            if model.training:
-                for key, val in self.aux_metric_calculator(
-                    (
-                        self.aux_preprocess_logits_for_metrics(outputs.logits, labels),
-                        labels,
-                    ), prefix=""
+            if model.training and self.compute_metrics is not None:
+                ignore_keys = []
+
+                module = model
+                # FIX: DistributedDataParallel
+                if not hasattr(module, "config") and hasattr(module, "module"):
+                    module = module.module
+                if hasattr(module, "config"):
+                    ignore_keys = getattr(
+                        module.config,
+                        "keys_to_ignore_at_inference",
+                        ["past_key_values"]
+                    )
+
+                logits = tuple(
+                    v for k, v in outputs.items() if k not in ignore_keys + ["loss"]
+                )
+                if len(logits) == 1:
+                    logits = logits[0]
+                if self.preprocess_logits_for_metrics is not None:
+                    logits = self.preprocess_logits_for_metrics(logits, labels)
+                for key, val in self.compute_metrics(
+                    (logits, labels), update_metrics=False, prefix=""
                 ).items():
                     if key in self._logs:
                         self._logs[key].append(val)
@@ -515,6 +520,32 @@ def main(**args):
                         self._logs[key] = [val]
 
             return (loss, outputs) if return_outputs else loss
+
+        def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys):
+            loss, logits, labels = super().prediction_step(
+                model, inputs, prediction_loss_only, ignore_keys
+            )
+
+            def pad_across_processes(tensors, dims=None):
+                if isinstance(tensors, tuple):
+                    return tuple(
+                        map(functools.partial(pad_across_processes, dims=dims), tensors)
+                    )
+                if dims is None:
+                    dims = tensors.dim()
+                elif dims < 0:
+                    dims = dims + tensors.dim()
+                for dim in range(2, dims):
+                    tensors = self.accelerator.pad_across_processes(
+                        tensors, dim=dim, pad_index=-100
+                    )
+                return tensors
+
+            if logits is not None:
+                logits = pad_across_processes(logits, dims=-1)
+            if labels is not None:
+                labels = pad_across_processes(labels)
+            return loss, logits, labels
 
         def log(self, logs, start_time=None):
             if self._logs:
@@ -526,39 +557,109 @@ def main(**args):
 
             super().log(logs, start_time=start_time)
 
-        @staticmethod
-        def aux_preprocess_logits_for_metrics(logits, labels):
+        @classmethod
+        def aux_preprocess_logits_for_metrics(cls, logits, labels, label_names=None):
             loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
+            if isinstance(logits, tuple) and isinstance(labels, tuple):
+                return tuple(
+                    cls.aux_preprocess_logits_for_metrics(
+                        p, l, label_names=label_names[i] if label_names else None
+                    ) for i, (p, l) in enumerate(zip(logits, labels))
+                )
+            assert not isinstance(logits, tuple), len(logits)
+            assert not isinstance(labels, tuple), len(labels)
+
+            n_shift = 0
+            if label_names is None or label_names[1]:
+                n_shift = labels.dim() - 1
+            logits_slices = [slice(0, -1)] * n_shift
+            labels_slices = [slice(1, None)] * n_shift
+
+            shift_logits = logits[..., *logits_slices, :].contiguous()
+            shift_labels = labels[..., *labels_slices].contiguous()
+
             loss_per_token = loss_fct(
                 shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
             )
-            return loss_per_token.view(-1, shift_labels.size(-1))
+            return loss_per_token.view(-1, *shift_labels.shape[1:])
 
-        @staticmethod
-        def aux_metric_calculator(preds, prefix="eval_"):
+        @classmethod
+        def aux_metric_calculator(
+            cls, metrics, preds, compute_result=False, update_metrics=True, prefix="eval_", label_names=None
+        ):
             """Computes metrics: n_fim / n_std, loss_fim / loss_std etc"""
             loss_per_token, labels = preds
 
             logs = {}
-            with torch.no_grad():
-                # Detect FIM examples: labels start with -100
-                is_fim = (
-                    labels == tokenizer.convert_tokens_to_ids(dataset.FIM_MIDDLE)
-                ).any(1)
 
-                for tag, mask in [("fim", is_fim), ("std", ~is_fim)]:
-                    # Add FIM/standard counts to logs
-                    logs[f"{prefix}n_{tag}"] = mask.sum().item()
+            if isinstance(loss_per_token, tuple) and isinstance(labels, tuple):
+                assert len(label_names) == len(loss_per_token)
+                for i, (p, l) in enumerate(zip(loss_per_token, labels)):
+                    label, _ = label_names[i]
+                    if label.endswith("labels"):
+                        label = label[:-len("labels")]
+                    logs.update(
+                        cls.aux_metric_calculator(
+                            metrics, (p, l),
+                            update_metrics=False,
+                            prefix=f"{prefix}{label}",
+                            label_names=label_names[i],
+                        )
+                    )
+            elif isinstance(loss_per_token, list) and isinstance(labels, list):
+                assert len(loss_per_token) % len(label_names) == 0, ([l.shape for l in loss_per_token], [l.shape for l in labels], label_names)
+                gather_logs = defaultdict(list)
 
-                    # Add FIM/standard loss to logs
-                    if mask.any():
-                        shift_labels = labels[mask][..., 1:]
-                        valid = shift_labels.reshape(-1) != -100
-                        if valid.any():
-                            loss = loss_per_token[mask].reshape(-1)
-                            logs[f"{prefix}loss_{tag}"] = loss[valid].mean().item()
+                for g in range(len(loss_per_token) // len(label_names)):
+                    i, j = g * len(label_names), (g + 1) * len(label_names)
+                    for key, value in cls.aux_metric_calculator(
+                        metrics, (tuple(loss_per_token[i:j]), tuple(labels[i:j])),
+                        update_metrics=False,
+                        prefix=prefix,
+                        label_names=label_names,
+                    ).items():
+                        gather_logs[key].append(value)
+
+                logs.update({k: sum(v)/len(v) for k, v in gather_logs.items()})
+            else:
+                with torch.no_grad():
+                    # Detect FIM examples: labels start with -100
+                    if args.fim_sft_style:
+                        is_fim = (labels[..., 0:1] == -100)
+                    else:
+                        is_fim = (
+                            labels == processor.tokenizer.convert_tokens_to_ids(
+                                processor.FIM_MIDDLE
+                            )
+                        )
+                    is_fim = is_fim.any(tuple(range(1, is_fim.dim())))
+
+                    eps = 1e-8
+                    n_shift = 0
+                    if label_names is None or label_names[1]:
+                        n_shift = labels.dim() - 1
+                    labels_slices = [slice(1, None)] * n_shift
+                    for tag, mask in [("fim", is_fim), ("std", ~is_fim)]:
+                        # Add FIM/standard counts to logs
+                        logs[f"{prefix}n_{tag}"] = mask.sum().item()
+
+                        # Add FIM/standard loss to logs
+                        if mask.any():
+                            shift_labels = labels[mask][..., *labels_slices]
+                            valid = (shift_labels != -100).reshape(-1)
+                            if valid.any():
+                                loss = loss_per_token[mask].reshape(-1)
+                                logs[f"{prefix}loss_{tag}"] = loss[valid].mean().item()
+
+            if update_metrics:
+                for k, v in logs.items():
+                    metrics[k].append(v)
+
+                if compute_result:
+                    logs = {k: sum(v)/len(v) for k, v in metrics.items()}
+                    metrics.clear()
+                    return logs
+
             return logs
 
     report_to = list(args.report_to) if args.report_to else []
@@ -582,12 +683,18 @@ def main(**args):
         save_steps=args.save_steps,
         eval_strategy=args.eval_strategy if (args.eval_files or args.dataset_eval_split) else "no",
         eval_steps=args.eval_steps if args.eval_strategy == "steps" else None,
+        per_device_eval_batch_size=args.per_device_train_batch_size,
         eval_accumulation_steps=args.gradient_accumulation_steps,
+        eval_use_gather_object=True,
+        eval_on_start=True if args.eval_files else False,
+        batch_eval_metrics=True,
+        label_names=[label for label, _ in label_names],
         bf16=use_cuda,                                # bf16 is preferred over fp16 on modern GPUs
         ddp_find_unused_parameters=False,             # disabled warning
         num_train_epochs=args.num_train_epochs,
         max_steps=args.max_steps,
         dataloader_num_workers=args.dataloader_num_workers,
+        dataloader_drop_last=True,
         remove_unused_columns=False,
         report_to=report_to,                          # SwanLab + TensorBoard
         run_name=args.run_name,
@@ -598,12 +705,18 @@ def main(**args):
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        processing_class=tokenizer,                  # transformers >=5 renamed `tokenizer`
+        processing_class=processor,                  # transformers >=5 renamed `tokenizer`
         train_sampler=train_sampler,
-        preprocess_logits_for_metrics=FIMTrainer.aux_preprocess_logits_for_metrics,
-        compute_metrics=FIMTrainer.aux_metric_calculator,
+        preprocess_logits_for_metrics=functools.partial(
+            FIMTrainer.aux_preprocess_logits_for_metrics,
+            label_names=label_names,
+        ),
+        compute_metrics=functools.partial(
+            FIMTrainer.aux_metric_calculator,
+            defaultdict(list),
+            label_names=label_names,
+        ),
     )
-
 
     # ==========================================
     # 5. INITIALIZE LOGGERS & START TRAINING
@@ -637,7 +750,7 @@ def main(**args):
 
     # Save final weights and configuration
     trainer.save_model(args.output_dir)
-    tokenizer.save_pretrained(args.output_dir)
+    processor.save_pretrained(args.output_dir)
 
     # Clean up distributed process group to avoid resource leaks
     if torch.distributed.is_initialized():

@@ -3,16 +3,11 @@ import pathlib
 from typing import Literal, Sequence, Union
 
 from Bio.Data.PDBData import protein_letters_3to1
+from biotite.structure import alphabet
 from datasets import Dataset
 import torch
 
 from proxyz.data.utils import lines, opener
-
-
-FIM_PREFIX = "<fim_prefix>"
-FIM_SUFFIX = "<fim_suffix>"
-FIM_MIDDLE = "<fim_middle>"
-FIM_TOKENS = [FIM_PREFIX, FIM_SUFFIX, FIM_MIDDLE]
 
 
 def line_iterator(file_paths: Sequence[str], batch_size=64):
@@ -47,7 +42,7 @@ def fasta_parse(file_path: str):
 
 def fasta_wrap(seq: str, width: int = 60) -> str:
     """Wrap a sequence string to FASTA line width."""
-    return "\n".join(seq[i : i + width] for i in range(0, len(seq), width))
+    return "\n".join(seq[i:i + width] for i in range(0, len(seq), width))
 
 
 def fasta_iterator(file_paths: Sequence[str], batch_size: int = 64):
@@ -75,18 +70,61 @@ def pdb_transform(data_dir: Union[pathlib.Path, str], examples: dict):
     assert "id" in examples
 
     coord, coord_mask, residue_idx, seq = [], [], [], []
+    cle, pseudo_beta, pseudo_beta_mask = [], [], []
     for pid in examples["id"]:
         graph = torch.load(processed_dir / f"{pid}.pt", weights_only=False)
         coord.append(graph.coords)
         coord_mask.append(graph.coord_mask)
         residue_idx.append(graph.residue_pdb_idx - graph.residue_pdb_idx[0])
-        seq.append("".join(protein_letters_3to1[r] for r in graph.residues))
+        seq.append("".join(protein_letters_3to1.get(r, "A") for r in graph.residues))
+
+        # atom indices
+        n_idx, ca_idx, c_idx, cb_idx = 0, 1, 2, 3
+
+        # pseudo_beta
+        is_gly = (graph.residue_type == 7)
+        pseudo_beta.append(
+            torch.where(
+                is_gly[:, None], graph.coords[:, ca_idx, :], graph.coords[:, cb_idx, :]
+            )
+        )
+        pseudo_beta_mask.append(
+            torch.where(
+                is_gly, graph.coord_mask[:, ca_idx], graph.coord_mask[:, cb_idx]
+            )
+        )
+
+        # 3di
+        nan = torch.full((3, ), torch.nan)
+        bbxyz = torch.stack(
+            (
+                torch.where(
+                    graph.coord_mask[:, ca_idx, None], graph.coords[:, ca_idx, :], nan
+                ),
+                torch.where(
+                    graph.coord_mask[:, cb_idx, None], graph.coords[:, cb_idx, :], nan
+                ),
+                torch.where(
+                    graph.coord_mask[:,  n_idx, None], graph.coords[:,  n_idx, :], nan
+                ),
+                torch.where(
+                    graph.coord_mask[:,  c_idx, None], graph.coords[:,  c_idx, :], nan
+                ),
+            )
+        )
+        cle.append(
+            torch.from_numpy(
+                alphabet.i3d.Encoder().encode(*bbxyz.numpy()).filled()
+            ).long()
+        )
 
     return {
         "text": seq,
         "residue_idx": residue_idx,
         "coord": coord,
-        "coord_mask": coord_mask
+        "coord_mask": coord_mask,
+        "distogram_labels": (pseudo_beta, pseudo_beta_mask),
+        "cle_labels": cle,
     }
 
 

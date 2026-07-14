@@ -1,3 +1,4 @@
+import contextlib
 import functools
 
 
@@ -7,4 +8,18 @@ class dict2object(object):
 
 
 def compose(*funcs):
-  return functools.reduce(lambda g, f: lambda x: f(g(x)), funcs)
+    return functools.reduce(lambda g, f: lambda x: f(g(x)), funcs)
+
+
+@contextlib.contextmanager
+def attr(obj, **kwags):
+    t = {key: getattr(obj, key) for key in kwags if hasattr(obj, key)}
+
+    for key in kwags:
+        setattr(obj, key, kwags[key])
+    yield obj
+    for key in kwags:
+        if key in t:
+            setattr(obj, key, t[key])
+        else:
+            delattr(obj, key)

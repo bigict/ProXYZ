@@ -4,8 +4,9 @@
 #             the file from the modular. If any change should be done, please apply the change to the
 #                          modular_xyz.py file directly. One of our CI enforces this.
 #                🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨
-
+import contextlib
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Optional
 
 import torch
@@ -21,7 +22,7 @@ from transformers.modeling_layers import (
     GenericForTokenClassification,
     GradientCheckpointingLayer,
 )
-from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
+from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast, TokenClassifierOutput
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from transformers.processing_utils import Unpack
@@ -30,6 +31,7 @@ from transformers.utils.generic import maybe_autocast, merge_with_config_default
 from transformers.utils.output_capturing import capture_outputs
 
 from .configuration_xyz import XYZConfig
+from .processing_xyz import XYZProcessor
 
 
 @use_kernel_forward_from_hub("RMSNorm")
@@ -132,6 +134,39 @@ class XYZMLP(nn.Module):
     def forward(self, x):
         down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
         return down_proj
+
+
+class XYZDistogram(nn.Module):
+    def __init__(self, config: XYZConfig):
+        super().__init__()
+        self.config = config
+
+        self.left_proj = nn.Linear(config.char_hidden_size, config.distogram_intermediate_size)
+        self.right_proj = nn.Linear(config.char_hidden_size, config.distogram_intermediate_size)
+        self.out_proj = nn.Linear(config.distogram_intermediate_size**2, config.distogram_bins_num)
+        self.act_fn = ACT2FN[config.hidden_act]
+
+    def forward(self, x):
+        # x = torch.einsum(
+        #     "... i c, ... j d -> ... i j c d", self.left_proj(x), self.right_proj(x)
+        # )
+        # x = x.view(*x.shape[:-2], -1)
+        # return self.out_proj(self.act_fn((x + x.transpose(-2, -3)) / 2))  # symmetrize
+
+        # Decompose the bilinear form to avoid materializing (B, L, L, D²).
+        # Reshape out_proj weight: (bins, D²) -> (bins, D, D)
+        d = self.config.distogram_intermediate_size
+        x = torch.einsum(
+            "k c d, ... i c, ... j d -> ... i j k",
+            self.out_proj.weight.view(self.config.distogram_bins_num, d, d),
+            self.act_fn(self.left_proj(x)),
+            self.act_fn(self.right_proj(x)),
+        )
+        # Symmetrize on (B, L, L, bins) and add bias
+        x = (x + x.transpose(-2, -3)) / 2
+        if self.out_proj.bias is not None:
+            x = x + self.out_proj.bias
+        return x
 
 
 def rotate_half(x):
@@ -315,82 +350,57 @@ class XYZDecoderLayer(GradientCheckpointingLayer):
         return hidden_states
 
 
-@auto_docstring
-class XYZPreTrainedModel(PreTrainedModel):
-    config: XYZConfig
-    base_model_prefix = "model"
-    supports_gradient_checkpointing = True
-    _no_split_modules = ["XYZDecoderLayer"]
-    _skip_keys_device_placement = ["past_key_values"]
-    _supports_flash_attn = True
-    _supports_sdpa = True
-    _supports_flex_attn = True
-
-    _can_compile_fullgraph = True
-    _supports_attention_backend = True
-    _can_record_outputs = {
-        "hidden_states": XYZDecoderLayer,
-        "attentions": XYZAttention,
-    }
-
-
-@auto_docstring
-class XYZModel(XYZPreTrainedModel):
+class XYZDecoderLayers(nn.Module):
     def __init__(self, config: XYZConfig):
-        super().__init__(config)
-        self.padding_idx = config.pad_token_id
-        self.vocab_size = config.vocab_size
+        super().__init__()
+        self.config = config  # FIX: AttributeError: 'XYZDecoderLayers' object has no attribute 'config'
 
-        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.layers = nn.ModuleList(
             [XYZDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
         self.norm = XYZRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.rotary_emb = XYZRotaryEmbedding(config=config)
-        self.gradient_checkpointing = False
-
-        # Initialize weights and apply final processing
-        self.post_init()
 
     @merge_with_config_defaults
     @capture_outputs
     @auto_docstring
     def forward(
         self,
-        input_ids: torch.LongTensor | None = None,
-        attention_mask: torch.Tensor | None = None,
+        inputs_embeds: torch.FloatTensor,
+        causal_mask: torch.Tensor,
+        position_embeddings: torch.Tensor,
         position_ids: torch.LongTensor | None = None,
         past_key_values: Cache | None = None,
-        inputs_embeds: torch.FloatTensor | None = None,
         use_cache: bool | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> BaseModelOutputWithPast:
-        if (input_ids is None) ^ (inputs_embeds is not None):
-            raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
+        """
+        Runs a stack of [`XYZDecoderLayer`] modules followed by RMS normalization.
 
-        if inputs_embeds is None:
-            inputs_embeds: torch.Tensor = self.embed_tokens(input_ids)
+        Args:
+            inputs_embeds (`torch.FloatTensor` of shape `(batch, seq_len, hidden_size)`):
+                Input embeddings (output of a projection or embedding layer).
+            causal_mask (`torch.Tensor`):
+                Pre-computed causal attention mask.
+            position_embeddings (`torch.Tensor`):
+                RoPE cos/sin embeddings for the current positions.
+            position_ids (`torch.LongTensor`, *optional*):
+                Position indices.  Inferred from *past_key_values* when *None*.
+            past_key_values (`Cache`, *optional*):
+                Key-value cache for incremental decoding.
+            use_cache (`bool`, *optional*):
+                Whether to populate and return the KV cache.
 
-        if use_cache and past_key_values is None:
-            past_key_values = DynamicCache(config=self.config)
-
+        Returns:
+            [`BaseModelOutputWithPast`] with the normalized hidden states and
+            (optionally) the updated KV cache.
+        """
         if position_ids is None:
             past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
             position_ids = torch.arange(inputs_embeds.shape[1], device=inputs_embeds.device) + past_seen_tokens
             position_ids = position_ids.unsqueeze(0)
 
-        causal_mask = create_causal_mask(
-            config=self.config,
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            past_key_values=past_key_values,
-            position_ids=position_ids,
-        )
-
         hidden_states = inputs_embeds
-        position_embeddings = self.rotary_emb(hidden_states, position_ids=position_ids)
-
-        for decoder_layer in self.layers[: self.config.num_hidden_layers]:
+        for decoder_layer in self.layers:
             hidden_states = decoder_layer(
                 hidden_states,
                 attention_mask=causal_mask,
@@ -409,16 +419,332 @@ class XYZModel(XYZPreTrainedModel):
 
 
 @auto_docstring
+class XYZPreTrainedModel(PreTrainedModel):
+    config: XYZConfig
+    base_model_prefix = "model"
+    supports_gradient_checkpointing = True
+    _no_split_modules = ["XYZDecoderLayer"]
+    _skip_keys_device_placement = ["past_key_values", "char_past_key_values"]
+    _supports_flash_attn = True
+    _supports_sdpa = True
+    _supports_flex_attn = True
+
+    _can_compile_fullgraph = True
+    _supports_attention_backend = True
+    _can_record_outputs = {
+        "hidden_states": XYZDecoderLayer,
+        "attentions": XYZAttention,
+    }
+
+
+@auto_docstring
+@dataclass
+class XYZModelOutputWithPast(BaseModelOutputWithPast):
+    """
+    Output of [`XYZModel`].
+
+    Extends [`BaseModelOutputWithPast`] with character-granularity outputs from
+    the U-Net decoder branch.
+
+    char_last_hidden_state (`torch.Tensor` of shape `(batch, char_seq_len, char_hidden_size)`, *optional*):
+        Character-level hidden states from the char decoder.
+    char_past_key_values (`tuple[Cache, Cache]`, *optional*):
+        Pair of KV caches — one for the char encoder, one for the char
+        decoder — used during incremental generation.
+    char_hidden_states (`tuple[torch.FloatTensor]`, *optional*):
+        Char-decoder hidden states at every layer (returned when
+        ``output_hidden_states=True``).  Each element has shape
+        `(batch, char_seq_len, char_hidden_size)`.
+    char_attentions (`tuple[torch.FloatTensor]`, *optional*):
+        Char-decoder self-attention weights at every layer (returned when
+        ``output_attentions=True``).  Each element has shape
+        `(batch, num_heads, char_seq_len, char_seq_len)`.
+    """
+
+    char_last_hidden_state: torch.FloatTensor | None = None
+    char_past_key_values: tuple[Cache, Cache] | None = None
+    char_hidden_states: tuple[torch.FloatTensor, ...] | None = None
+    char_attentions: tuple[torch.FloatTensor, ...] | None = None
+
+
+class XYZModel(XYZPreTrainedModel):
+    def __init__(self, config: XYZConfig):
+        super().__init__(config)
+
+        self.padding_idx = config.pad_token_id
+        self.vocab_size = config.vocab_size
+
+        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
+        self.rotary_emb = XYZRotaryEmbedding(config=config)
+
+        # Encoder (character granularity)
+        self.to_char_encoder = nn.Sequential(nn.Linear(config.hidden_size, config.char_hidden_size, bias=False))
+        with self.config.characterization() as config:
+            self.char_encoder = XYZDecoderLayers(config)
+        self.from_char_encoder = nn.Sequential(
+            nn.Linear(config.char_hidden_size, config.hidden_size, bias=False),
+        )
+
+        # Trunk
+        with self.config.tokenization() as config:
+            self.trunk = XYZDecoderLayers(config)
+
+        # Decoder (character granularity)
+        self.to_char_decoder = nn.Sequential(nn.Linear(config.hidden_size, config.char_hidden_size, bias=False))
+        with self.config.characterization() as config:
+            self.char_decoder = XYZDecoderLayers(config)
+
+        self.gradient_checkpointing = False
+
+    @merge_with_config_defaults
+    @capture_outputs
+    @auto_docstring
+    def forward(
+        self,
+        input_ids: torch.LongTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        past_key_values: Cache | None = None,
+        inputs_embeds: torch.FloatTensor | None = None,
+        char_input_ids: torch.LongTensor | None = None,
+        char_attention_mask: torch.Tensor | None = None,
+        char_position_ids: torch.LongTensor | None = None,
+        char_past_key_values: tuple[Cache, Cache] | None = None,
+        char_inputs_embeds: torch.FloatTensor | None = None,
+        repr_char_idx: torch.LongTensor | None = None,
+        use_cache: bool | None = None,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> XYZModelOutputWithPast:
+        """
+        U-Net forward pass: char encoder → token trunk → char decoder.
+
+        **Stage 1 — Char encoder.**  Token embeddings are projected to
+        *char_hidden_size* and processed by the char encoder stack.
+
+        **Stage 2 — Token trunk.**  Char hidden states are gathered at
+        representative positions (``repr_char_idx``), projected back to
+        *hidden_size*, and added to the token embeddings.  The result is
+        processed by the trunk transformer.
+
+        **Stage 3 — Char decoder.**  Trunk output is projected to
+        *char_hidden_size* and scattered back to char positions via
+        ``scatter_add`` (skip connection from the trunk).  The char decoder
+        stack refines the representation with U-Net skip connections from the
+        encoder.
+
+        Args:
+            input_ids (`torch.LongTensor` of shape `(batch, token_seq_len)`, *optional*):
+                BPE token indices.  Mutually exclusive with *inputs_embeds*.
+            attention_mask (`torch.Tensor` of shape `(batch, token_seq_len)`, *optional*):
+                Token-level attention mask (1 = attend, 0 = mask).
+            position_ids (`torch.LongTensor`, *optional*):
+                Token position indices.  Inferred from *past_key_values* when *None*.
+            past_key_values (`Cache`, *optional*):
+                Trunk KV cache for incremental decoding.
+            inputs_embeds (`torch.FloatTensor`, *optional*):
+                Pre-computed token embeddings.  Mutually exclusive with *input_ids*.
+            char_input_ids (`torch.LongTensor` of shape `(batch, char_seq_len)`, *optional*):
+                Character-level token indices.  Mutually exclusive with
+                *char_inputs_embeds*.
+            char_attention_mask (`torch.Tensor` of shape `(batch, char_seq_len)`, *optional*):
+                Character-level attention mask.
+            char_position_ids (`torch.LongTensor`, *optional*):
+                Character position indices.  Inferred from *char_past_key_values*
+                when *None*.
+            char_past_key_values (`tuple[Cache, Cache]`, *optional*):
+                Pair of KV caches for the char encoder and char decoder.
+            char_inputs_embeds (`torch.FloatTensor`, *optional*):
+                Pre-computed char embeddings.  Mutually exclusive with *char_input_ids*.
+            repr_char_idx (`torch.LongTensor` of shape `(batch, token_seq_len)`, *optional*):
+                Maps each BPE token to its representative character position in
+                the char sequence.  Used to gather encoder output into the trunk
+                and scatter trunk output back to the decoder.
+            use_cache (`bool`, *optional*):
+                Whether to populate and return KV caches.
+
+        Returns:
+            [`XYZModelOutputWithPast`]:
+                - **last_hidden_state** — token-level output from the trunk.
+                - **char_last_hidden_state** — char-level output from the char
+                  decoder.
+                - **past_key_values** / **char_past_key_values** — updated caches.
+        """
+        # character level.
+        if (char_input_ids is None) ^ (char_inputs_embeds is not None):
+            raise ValueError("You must specify exactly one of char_input_ids or char_inputs_embeds")
+
+        if char_inputs_embeds is None:
+            char_inputs_embeds: torch.Tensor = self.to_char_encoder(self.embed_tokens(char_input_ids))
+
+        # if use_cache and char_past_key_values is None:
+        #     with self.config.characterization() as config:
+        #         char_past_key_values = (
+        #             DynamicCache(config=config), DynamicCache(config=config)
+        #         )
+
+        if char_position_ids is None:
+            char_past_seen_tokens = char_past_key_values[0].get_seq_length() if char_past_key_values is not None else 0
+            char_position_ids = (
+                torch.arange(char_inputs_embeds.shape[1], device=char_inputs_embeds.device) + char_past_seen_tokens
+            )
+            char_position_ids = char_position_ids.unsqueeze(0)
+
+        char_position_embeddings = self.rotary_emb(char_inputs_embeds, position_ids=char_position_ids)
+
+        # token level
+        if (input_ids is None) ^ (inputs_embeds is not None):
+            raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
+
+        if inputs_embeds is None:
+            inputs_embeds: torch.Tensor = self.embed_tokens(input_ids)
+
+        if use_cache and past_key_values is None:
+            with self.config.tokenization() as config:
+                past_key_values = DynamicCache(config=self.config)
+
+        if self.config.use_char_position_ids:  # gather from `char_position_ids`
+            position_ids = char_position_ids
+            if char_position_ids.shape[0] != repr_char_idx.shape[0]:
+                assert char_position_ids.shape[0] == 1
+                position_ids = position_ids.expand(repr_char_idx.shape[0], char_position_ids.shape[1])
+            position_ids = position_ids.gather(1, repr_char_idx)
+        elif position_ids is None:
+            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+            position_ids = torch.arange(inputs_embeds.shape[1], device=inputs_embeds.device) + past_seen_tokens
+            position_ids = position_ids.unsqueeze(0)
+        position_embeddings = self.rotary_emb(inputs_embeds, position_ids=position_ids)
+
+        # encode
+        with self.config.characterization() as config:
+            char_causal_mask = create_causal_mask(
+                config=config,
+                inputs_embeds=char_inputs_embeds,
+                attention_mask=char_attention_mask,
+                past_key_values=char_past_key_values[0] if char_past_key_values else None,
+                position_ids=char_position_ids,
+            )
+            encoder_outputs: BaseModelOutputWithPast = self.char_encoder(
+                inputs_embeds=char_inputs_embeds,
+                causal_mask=char_causal_mask,
+                position_embeddings=char_position_embeddings,
+                position_ids=char_position_ids,
+                past_key_values=char_past_key_values[0] if char_past_key_values else None,
+                use_cache=use_cache,
+                **kwargs,
+            )
+
+        # trunk
+        inputs_embeds = inputs_embeds + self.from_char_encoder(
+            encoder_outputs.last_hidden_state.gather(
+                1, repr_char_idx[..., None].expand(*repr_char_idx.shape, encoder_outputs.last_hidden_state.shape[2])
+            )
+        )
+        with self.config.tokenization() as config:
+            causal_mask = create_causal_mask(
+                config=config,
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+                position_ids=position_ids,
+            )
+
+            trunk_outputs: BaseModelOutputWithPast = self.trunk(
+                inputs_embeds=inputs_embeds,
+                causal_mask=causal_mask,
+                position_embeddings=position_embeddings,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                **kwargs,
+            )
+
+        # decode
+        trunk_last_hidden_state = self.to_char_decoder(trunk_outputs.last_hidden_state)
+        char_inputs_embeds = encoder_outputs.last_hidden_state.scatter_add(  # skip connection
+            1, repr_char_idx[..., None].expand_as(trunk_last_hidden_state), trunk_last_hidden_state
+        )
+        with self.config.characterization() as config:
+            decoder_outputs: BaseModelOutputWithPast = self.char_decoder(
+                inputs_embeds=char_inputs_embeds,
+                causal_mask=char_causal_mask,
+                position_embeddings=char_position_embeddings,
+                position_ids=char_position_ids,
+                past_key_values=char_past_key_values[1] if char_past_key_values else None,
+                use_cache=use_cache,
+                **kwargs,
+            )
+
+        return XYZModelOutputWithPast(
+            last_hidden_state=trunk_outputs.last_hidden_state,
+            past_key_values=trunk_outputs.past_key_values,
+            char_last_hidden_state=decoder_outputs.last_hidden_state,
+            char_past_key_values=(encoder_outputs.past_key_values, decoder_outputs.past_key_values),
+        )
+
+
+@auto_docstring
+@dataclass
+class XYZCausalLMOutputWithPast(CausalLMOutputWithPast):
+    """
+    Output of [`XYZCausalLMOutputWithPast`].
+
+    Extends [`CausalLMOutputWithPast`] with character-granularity logits and
+    hidden states for the auxiliary next-character prediction head.
+
+    offset_mapping (`torch.LongTensor` of shape `(batch, token_seq_len, 2)`, *optional*):
+        A list of (start_char, end_char) tuples for each token, mapping tokens back to
+        the original text characters.
+    char_logits (`torch.FloatTensor` of shape `(batch, char_seq_len, vocab_size)`, *optional*):
+        Next-character prediction logits from the char decoder LM head.
+    char_past_key_values (`tuple[Cache, Cache]`, *optional*):
+        Pair of KV caches — one for the char encoder, one for the char
+        decoder — used during incremental generation.
+    char_hidden_states (`tuple[torch.FloatTensor]`, *optional*):
+        Char-decoder hidden states at every layer (returned when
+        ``output_hidden_states=True``).
+    char_attentions (`tuple[torch.FloatTensor]`, *optional*):
+        Char-decoder self-attention weights at every layer (returned when
+        ``output_attentions=True``).
+    cle_logits (`torch.FloatTensor` of shape `(batch, char_seq_len, 26)`, *optional*):
+        CLE (Cα–Local–Environment) classification logits from the
+        auxiliary CLE head.
+    distogram_logits (`torch.FloatTensor` of shape `(batch, char_seq_len, char_seq_len, distogram_bins_num)`, *optional*):
+        Pairwise residue–residue distance-bin logits from the distogram
+        head.
+    """
+
+    offset_mapping: torch.LongTensor | None = None
+    char_logits: torch.FloatTensor | None = None
+    char_past_key_values: tuple[Cache, Cache] | None = None
+    char_hidden_states: tuple[torch.FloatTensor, ...] | None = None
+    char_attentions: tuple[torch.FloatTensor, ...] | None = None
+    cle_logits: torch.FloatTensor | None = None
+    distogram_logits: torch.FloatTensor | None = None
+
+
+@auto_docstring
 class XYZForCausalLM(XYZPreTrainedModel, GenerationMixin):
     _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
     _tp_plan = {"lm_head": "colwise_gather_output"}
     _pp_plan = {"lm_head": (["hidden_states"], ["logits"])}
 
-    def __init__(self, config):
+    def __init__(self, config: XYZConfig):
         super().__init__(config)
         self.model = XYZModel(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+
+        if config.has_char_lm_head:
+            self.char_lm_head = nn.Linear(config.char_hidden_size, config.vocab_size, bias=False)
+        if config.has_cle_lm_head:
+            self.cle_lm_head = nn.Linear(config.char_hidden_size, 26, bias=False)
+        if config.has_distogram_lm_head:
+            # self.distogram_head = nn.Sequential(
+            #     nn.Linear(config.char_hidden_size, config.char_hidden_size, bias=False),
+            #     nn.GELU(),
+            #     nn.Linear(config.char_hidden_size, config.distogram_bins_num, bias=False),
+            # )
+            self.distogram_head = XYZDistogram(config)
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -433,37 +759,98 @@ class XYZForCausalLM(XYZPreTrainedModel, GenerationMixin):
         past_key_values: Cache | None = None,
         inputs_embeds: torch.FloatTensor | None = None,
         labels: torch.LongTensor | None = None,
-        use_cache: bool | None = None,
         logits_to_keep: int | torch.Tensor = 0,
+        char_input_ids: torch.LongTensor | None = None,
+        char_attention_mask: torch.Tensor | None = None,
+        char_position_ids: torch.LongTensor | None = None,
+        char_past_key_values: tuple[Cache, Cache] | None = None,
+        char_inputs_embeds: torch.FloatTensor | None = None,
+        char_labels: torch.LongTensor | None = None,
+        char_logits_to_keep: int | torch.Tensor = 0,
+        cle_labels: torch.LongTensor | None = None,
+        distogram_labels: torch.LongTensor | None = None,
+        repr_char_idx: torch.LongTensor | None = None,
+        use_cache: bool | None = None,
         **kwargs: Unpack[TransformersKwargs],
-    ) -> CausalLMOutputWithPast:
-        r"""
-        Example:
+    ) -> XYZCausalLMOutputWithPast:
+        """
+        Causal language-modeling forward pass with dual prediction heads.
 
-        ```python
-        >>> from transformers import AutoTokenizer, XYZForCausalLM
+        Runs the U-Net backbone ([`XYZModel`]) and applies two LM heads:
 
-        >>> model = XYZForCausalLM.from_pretrained("meta-x_y_z/XYZ-2-7b-hf")
-        >>> tokenizer = AutoTokenizer.from_pretrained("meta-x_y_z/XYZ-2-7b-hf")
+        - **Next-token** — ``lm_head`` on trunk output → token logits
+        - **Next-character** — ``char_lm_head`` on char-decoder output → char logits
 
-        >>> prompt = "Hey, are you conscious? Can you talk to me?"
-        >>> inputs = tokenizer(prompt, return_tensors="pt")
+        Losses are summed when both *labels* and *char_labels* are provided.
 
-        >>> # Generate
-        >>> generate_ids = model.generate(inputs.input_ids, max_length=30)
-        >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
-        "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
-        ```"""
-        outputs: BaseModelOutputWithPast = self.model(
+        Args:
+            input_ids (`torch.LongTensor` of shape `(batch, token_seq_len)`, *optional*):
+                BPE token indices.
+            attention_mask (`torch.Tensor`, *optional*):
+                Token-level attention mask.
+            position_ids (`torch.LongTensor`, *optional*):
+                Token position indices.
+            past_key_values (`Cache`, *optional*):
+                Trunk KV cache.
+            inputs_embeds (`torch.FloatTensor`, *optional*):
+                Pre-computed token embeddings.
+            labels (`torch.LongTensor` of shape `(batch, token_seq_len)`, *optional*):
+                Ground-truth token ids for next-token loss.  Shifted internally.
+            logits_to_keep (`int` or `torch.Tensor`, *optional*, defaults to 0):
+                If an int, only compute logits for the last ``logits_to_keep``
+                token positions (saves memory during training).  If a tensor,
+                used as an explicit slice / boolean mask.
+            char_input_ids (`torch.LongTensor` of shape `(batch, char_seq_len)`, *optional*):
+                Character-level token indices.
+            char_attention_mask (`torch.Tensor`, *optional*):
+                Character-level attention mask.
+            char_position_ids (`torch.LongTensor`, *optional*):
+                Character position indices.
+            char_past_key_values (`tuple[Cache, Cache]`, *optional*):
+                Char encoder / decoder KV caches.
+            char_inputs_embeds (`torch.FloatTensor`, *optional*):
+                Pre-computed char embeddings.
+            char_labels (`torch.LongTensor` of shape `(batch, char_seq_len)`, *optional*):
+                Ground-truth char ids for next-character loss.  Shifted internally.
+            char_logits_to_keep (`int` or `torch.Tensor`, *optional*, defaults to 0):
+                Same as ``logits_to_keep`` but for the char-level heads
+                (``char_lm_head``, ``cle_lm_head``).
+            cle_labels (`torch.LongTensor` of shape `(batch, char_seq_len)`, *optional*):
+                Ground-truth CLE class ids for the CLE classification loss.
+            distogram_labels (`torch.LongTensor` of shape `(batch, char_seq_len, char_seq_len)`, *optional*):
+                Ground-truth distance-bin indices for the distogram head.
+                Each value is a bin index in ``[0, distogram_bins_num)``.
+            repr_char_idx (`torch.LongTensor`, *optional*):
+                Token → representative-char mapping.
+            use_cache (`bool`, *optional*):
+                Whether to populate and return KV caches.
+
+        Returns:
+            [`XYZForCausalLMOutput`]:
+                - **loss** — combined next-token + next-character + aux CE loss.
+                - **logits** — next-token logits (used by `generate()`).
+                - **char_logits** — next-character logits.
+                - **cle_logits** — CLE classification logits.
+                - **distogram_logits** — pairwise distance-bin logits
+                  of shape `(batch, char_seq_len, char_seq_len, distogram_bins_num)`.
+        """
+        outputs: XYZModelOutputWithPast = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
+            char_input_ids=char_input_ids,
+            char_attention_mask=char_attention_mask,
+            char_position_ids=char_position_ids,
+            char_past_key_values=char_past_key_values,
+            char_inputs_embeds=char_inputs_embeds,
+            repr_char_idx=repr_char_idx,
             use_cache=use_cache,
             **kwargs,
         )
 
+        # trunk
         hidden_states = outputs.last_hidden_state
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
@@ -471,19 +858,216 @@ class XYZForCausalLM(XYZPreTrainedModel, GenerationMixin):
 
         loss = None
         if labels is not None:
-            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
+            loss = self.loss_function(
+                logits=logits,
+                labels=labels,
+                vocab_size=self.config.vocab_size,
+                **kwargs,
+            )
 
-        return CausalLMOutputWithPast(
+        # decoder
+        char_hidden_states = outputs.char_last_hidden_state
+        # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
+        slice_indices = (
+            slice(-char_logits_to_keep, None) if isinstance(char_logits_to_keep, int) else char_logits_to_keep
+        )
+
+        aux_loss = []
+
+        char_logits = None
+        if self.config.has_char_lm_head:
+            char_logits = self.char_lm_head(char_hidden_states[:, slice_indices, :])
+            if char_labels is not None:
+                with self.num_items_in_batch(
+                    kwargs, outputs.char_last_hidden_state.size(-2) / outputs.last_hidden_state.size(-2)
+                ):
+                    aux_loss.append(
+                        self.loss_function(
+                            logits=char_logits,
+                            labels=char_labels,
+                            vocab_size=self.config.vocab_size,
+                            **kwargs,
+                        )
+                    )
+        cle_logits = None
+        if self.config.has_cle_lm_head:
+            cle_logits = self.cle_lm_head(char_hidden_states[:, slice_indices, :])
+            if cle_labels is not None:
+                with self.num_items_in_batch(
+                    kwargs, outputs.char_last_hidden_state.size(-2) / outputs.last_hidden_state.size(-2)
+                ):
+                    aux_loss.append(
+                        self.loss_function(
+                            logits=cle_logits,
+                            labels=cle_labels,
+                            vocab_size=26,
+                            shift_labels=cle_labels,  # FIX: Fake the `ForCausalLMLoss`
+                            **kwargs,
+                        )
+                    )
+
+        distogram_logits = None
+        if self.config.has_distogram_lm_head:
+            # pairwise outer sum: (B, L, H) -> (B, L, L, H) -> (B, L, L, num_bins)
+            # h = char_hidden_states
+            # pair_repr = h.unsqueeze(1) + h.unsqueeze(2)
+            distogram_logits = self.distogram_head(char_hidden_states[:, slice_indices, :])
+            if distogram_labels is not None:
+                ignore_index = kwargs.get("ignore_index", -100)
+                # shift_distogram_labels = nn.functional.pad(
+                #     distogram_labels, (0, 1, 0, 1), value=ignore_index
+                # )
+                # shift_distogram_labels = shift_distogram_labels[..., 1:, 1:].contiguous()
+                with self.num_items_in_batch(
+                    kwargs, outputs.char_last_hidden_state.size(-2) / outputs.last_hidden_state.size(-2)
+                ):
+                    num_items_in_batch = kwargs.get("num_items_in_batch")
+                if num_items_in_batch is None:
+                    aux_loss.append(
+                        self.loss_function(
+                            logits=distogram_logits,
+                            labels=distogram_labels,
+                            vocab_size=self.config.distogram_bins_num,
+                            shift_labels=distogram_labels,  # FIX: Fake the `ForCausalLMLoss`
+                            **kwargs,
+                        )
+                    )
+                else:
+                    eps = 1e-8
+                    distogram_loss = nn.functional.cross_entropy(
+                        distogram_logits.reshape(-1, self.config.distogram_bins_num),
+                        distogram_labels.reshape(-1),
+                        ignore_index=ignore_index,
+                        reduction="none",
+                    ).view_as(distogram_labels)
+                    distogram_loss = (
+                        distogram_loss.sum(-1) / ((distogram_labels != ignore_index).sum(-1) + eps)
+                    ).sum()
+                    # just in case users pass an int for num_items_in_batch, which could be the case for custom trainer
+                    if torch.is_tensor(num_items_in_batch):
+                        num_items_in_batch = num_items_in_batch.to(distogram_loss.device)
+                    aux_loss.append(distogram_loss / num_items_in_batch)
+                # aux_loss.append(
+                #     self.loss_function(
+                #         logits=distogram_logits,
+                #         labels=distogram_labels,
+                #         vocab_size=self.config.distogram_bins_num,
+                #         labels=distogram_labels,
+                #         **kwargs,
+                #     )
+                # )
+
+        if loss is not None and aux_loss:
+            loss = loss + sum(aux_loss)
+        elif aux_loss:
+            loss = sum(aux_loss)
+
+        return XYZCausalLMOutputWithPast(
             loss=loss,
             logits=logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
+            offset_mapping=kwargs.get("offset_mapping"),
+            char_logits=char_logits,
+            char_past_key_values=outputs.char_past_key_values,
+            char_hidden_states=outputs.char_hidden_states,
+            char_attentions=outputs.char_attentions,
+            cle_logits=cle_logits,
+            distogram_logits=distogram_logits,
         )
+
+    @contextlib.contextmanager
+    def num_items_in_batch(self, kwargs, amplify: float | None):
+        if "num_items_in_batch" in kwargs:
+            num_items_in_batch = kwargs["num_items_in_batch"]
+            if amplify is not None:
+                kwargs["num_items_in_batch"] = num_items_in_batch * amplify
+            else:
+                kwargs["num_items_in_batch"] = None
+        yield kwargs
+        if "num_items_in_batch" in kwargs:
+            kwargs["num_items_in_batch"] = num_items_in_batch
+
+    def prepare_inputs_for_generation(
+        self,
+        input_ids: torch.LongTensor,
+        next_sequence_length: int | None = None,
+        past_key_values: Cache | None = None,
+        attention_mask: torch.LongTensor | None = None,
+        inputs_embeds: torch.FloatTensor | None = None,
+        is_first_iteration: bool | None = False,
+        offset_mapping: torch.LongTensor | None = None,
+        processor: XYZProcessor | None = None,
+        **kwargs,
+    ):
+        model_inputs = super().prepare_inputs_for_generation(
+            input_ids=input_ids,
+            next_sequence_length=next_sequence_length,
+            past_key_values=past_key_values,
+            attention_mask=attention_mask,
+            inputs_embeds=inputs_embeds,
+            is_first_iteration=is_first_iteration,
+            **kwargs,
+        )
+        # append offset_mapping
+        if not is_first_iteration:  # not prefill stage
+            tokenized = processor.to_tokenization(processor.to_example(model_inputs["input_ids"]), generate=True)
+            tokenized["offset_mapping"] = tokenized["offset_mapping"].to(device=offset_mapping.device)
+            if kwargs.get("use_cache"):
+                tokenized["offset_mapping"] = tokenized["offset_mapping"] + offset_mapping[:, -1:, -1:]
+                offset_mapping = torch.cat((offset_mapping, tokenized["offset_mapping"]), dim=1)
+            else:
+                offset_mapping = tokenized["offset_mapping"]
+        # make char-level inputs
+        model_inputs.update(offset_mapping=offset_mapping)
+        model_inputs.update(
+            processor.to_characterization(processor.to_example(input_ids), model_inputs, generate=True)
+        )
+        return model_inputs
+
+    def _update_model_kwargs_for_generation(
+        self,
+        outputs: XYZCausalLMOutputWithPast,
+        model_kwargs: dict,
+        is_encoder_decoder: bool = False,
+        num_new_tokens: int = 1,
+    ) -> dict:
+        model_kwargs = super()._update_model_kwargs_for_generation(
+            outputs, model_kwargs, is_encoder_decoder=is_encoder_decoder, num_new_tokens=num_new_tokens
+        )
+        if outputs.offset_mapping is not None:
+            model_kwargs["offset_mapping"] = outputs.offset_mapping
+        return model_kwargs
 
 
 class XYZForSequenceClassification(GenericForSequenceClassification, XYZPreTrainedModel):
     pass
+
+
+@auto_docstring
+@dataclass
+class XYZTokenClassifierOutput(TokenClassifierOutput):
+    """
+    Output of [`XYZForTokenClassification`].
+
+    Extends [`TokenClassifierOutput`] with character-granularity logits and
+    hidden states for the auxiliary next-character prediction head.
+
+    lm_output (`XYZCausalLMOutputWithPast`, *optional*):
+        Full causal-LM output from the U-Net backbone, including next-token
+        logits (``logits``) and next-character logits (``char_logits``)
+    cle_logits (`torch.FloatTensor` of shape `(batch, char_seq_len, 26)`, *optional*):
+        CLE (Cα–Local–Environment) classification logits from the
+        auxiliary CLE head.
+    distogram_logits (`torch.FloatTensor` of shape `(batch, char_seq_len, char_seq_len, distogram_bins_num)`, *optional*):
+        Pairwise residue–residue distance-bin logits from the distogram
+        head.
+    """
+
+    lm_output: XYZCausalLMOutputWithPast | None = None
+    cle_logits: torch.FloatTensor | None = None
+    distogram_logits: torch.FloatTensor | None = None
 
 
 class XYZForTokenClassification(GenericForTokenClassification, XYZPreTrainedModel):
@@ -492,8 +1076,11 @@ class XYZForTokenClassification(GenericForTokenClassification, XYZPreTrainedMode
 
 __all__ = [
     "XYZPreTrainedModel",
+    "XYZModelOutputWithPast",
     "XYZModel",
+    "XYZCausalLMOutputWithPast",
     "XYZForCausalLM",
     "XYZForSequenceClassification",
+    "XYZTokenClassifierOutput",
     "XYZForTokenClassification",
 ]

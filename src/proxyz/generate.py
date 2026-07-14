@@ -182,6 +182,7 @@ def main(**args):
         with torch.no_grad():
             out = model.generate(
                 **input_ids,
+                processor=processor,
                 generation_config=gen_config,
                 logits_processor=logits_processor,
             )

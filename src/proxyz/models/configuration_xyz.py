@@ -4,6 +4,8 @@
 #             the file from the modular. If any change should be done, please apply the change to the
 #                          modular_xyz.py file directly. One of our CI enforces this.
 #                🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨
+import contextlib
+
 from huggingface_hub.dataclasses import strict
 
 from transformers.configuration_utils import PreTrainedConfig
@@ -12,39 +14,121 @@ from transformers.utils import auto_docstring
 from transformers.utils.type_validators import interval
 
 
+@contextlib.contextmanager
+def attr(obj, **kwags):
+    t = {key: getattr(obj, key) for key in kwags if hasattr(obj, key)}
+
+    for key in kwags:
+        setattr(obj, key, kwags[key])
+    yield obj
+    for key in kwags:
+        if key in t:
+            setattr(obj, key, t[key])
+        else:
+            delattr(obj, key)
+
+
 @auto_docstring(checkpoint="bigict/ProXYZ")
 @strict
 class XYZConfig(PreTrainedConfig):
-    r"""
+    """
+    Configuration for the XYZ U-Net style protein language model.
+
+    A three-stage architecture:
+
+    1. **Char encoder** — transformer at character (residue) granularity
+    2. **Token trunk** — transformer at BPE-token granularity
+    3. **Char decoder** — transformer at character granularity with U-Net skip
+       connections from the encoder
+
+    The char encoder/decoder share the same ``head_dim`` as the trunk so that
+    a single ``RotaryEmbedding`` instance can be used across all three stacks.
+
+    This configuration extends [`LlamaConfig`].  All token-level fields
+    (``hidden_size``, ``intermediate_size``, ``num_hidden_layers``, etc.) are
+    inherited and control the *trunk* transformer.  The char-level fields
+    below control the encoder and decoder.
+
+    Constraint: ``char_hidden_size == char_num_attention_heads × head_dim``.
+
+    char_hidden_size (`int`, *optional*, defaults to 2048):
+        Hidden size of the char encoder / decoder transformer.
+    char_intermediate_size (`int`, *optional*, defaults to 5504):
+        FFN intermediate size for char-level layers.
+    char_num_hidden_layers (`int`, *optional*, defaults to 4):
+        Number of transformer layers in the char encoder and char decoder.
+    char_num_attention_heads (`int`, *optional*, defaults to 16):
+        Number of attention heads for char-level self-attention.
+    char_num_key_value_heads (`int`, *optional*):
+        Number of KV heads for GQA at char level.  Defaults to
+        ``char_num_attention_heads`` (i.e. multi-head attention) when
+        not specified.
+
+    use_char_position_ids (`bool`, *optional*, defaults to `False`):
+        If ``True``, token-level ``position_ids`` are gathered from
+        ``char_position_ids`` via ``repr_char_idx`` instead of being
+        computed independently.  This keeps RoPE aligned between the
+        char and token stacks.
+
+    has_char_lm_head (`bool`, *optional*, defaults to `False`):
+        If ``True``, create a next-character prediction head
+        (``char_lm_head``) on top of the char decoder output.
+
+    has_cle_lm_head (`bool`, *optional*, defaults to `False`):
+        If ``True``, create a CLE (Cα–Local–Environment) classification
+        head on top of the char decoder output.
+
+    has_distogram_lm_head (`bool`, *optional*, defaults to `False`):
+        If ``True``, create a distogram prediction head on top of the
+        char decoder output.  Predicts pairwise residue–residue distance
+        bins via an outer-sum MLP.
+
+    cle_vocab_size (`int`, *optional*, defaults to 26):
+        CLE vocabu size.
+
+    distogram_bins_num (`int`, *optional*, defaults to 64):
+        Number of distance bins for the distogram head.
+
+    distogram_intermediate_size (`int`, *optional*, defaults to 32):
+        Inner dimension for the distogram pair representation.  Each
+        residue is projected to this size by separate left/right linear
+        layers; the outer product yields a ``distogram_intermediate_size²``
+        feature per residue pair before the final classification layer.
+
+    distogram_chunk_size (`int`, *optional*, defaults to 0):
+        If > 0, compute the distogram in chunks of this size along the
+        first sequence dimension to reduce peak memory.  ``0`` disables
+        chunking (compute the full ``L×L`` matrix at once).
+
+    Note:
+        ``char_head_dim`` is intentionally omitted — the char stacks reuse the
+        token-level ``head_dim`` so that RoPE can be shared.
+
+    Example:
     ```python
-    >>> from transformers import XYZModel, XYZConfig
+    >>> from proxyz.models import XYZConfig, XYZForCausalLM
+    >>> config = XYZConfig()
+    >>> model = XYZForCausalLM(config)
+    ```
+    """
 
-    >>> # Initializing a XYZ x_y_z-7b style configuration
-    >>> configuration = XYZConfig()
+    model_type = "xyz"
+    keys_to_ignore_at_inference = ["past_key_values", "char_past_key_values", "offset_mapping"]
 
-    >>> # Initializing a model from the x_y_z-7b style configuration
-    >>> model = XYZModel(configuration)
-
-    >>> # Accessing the model configuration
-    >>> configuration = model.config
-    ```"""
-
-    model_type = "x_y_z"
-    keys_to_ignore_at_inference = ["past_key_values"]
-    # Default tensor parallel plan for base model `XYZModel`
+    # ---- Tensor-parallel / pipeline-parallel plans (inherited from Llama) ----
     base_model_tp_plan = {
-        "layers.*.self_attn.q_proj": "colwise",
-        "layers.*.self_attn.k_proj": "colwise",
-        "layers.*.self_attn.v_proj": "colwise",
-        "layers.*.self_attn.o_proj": "rowwise",
-        "layers.*.mlp.gate_proj": "colwise",
-        "layers.*.mlp.up_proj": "colwise",
-        "layers.*.mlp.down_proj": "rowwise",
+        ".*.layers.*.self_attn.q_proj": "colwise",
+        ".*.layers.*.self_attn.k_proj": "colwise",
+        ".*.layers.*.self_attn.v_proj": "colwise",
+        ".*.layers.*.self_attn.o_proj": "rowwise",
+        ".*.layers.*.mlp.gate_proj": "colwise",
+        ".*.layers.*.mlp.up_proj": "colwise",
+        ".*.layers.*.mlp.down_proj": "rowwise",
     }
     base_model_pp_plan = {
         "embed_tokens": (["input_ids"], ["inputs_embeds"]),
-        "layers": (["hidden_states", "attention_mask"], ["hidden_states"]),
-        "norm": (["hidden_states"], ["hidden_states"]),
+        ".*.layers": (["hidden_states", "attention_mask"], ["hidden_states"]),
+        ".*.norm": (["hidden_states"], ["hidden_states"]),
     }
 
     vocab_size: int = 32000
@@ -69,7 +153,28 @@ class XYZConfig(PreTrainedConfig):
     mlp_bias: bool = False
     head_dim: int | None = None
 
+    char_hidden_size: int = 2048
+    char_intermediate_size: int = 5504
+    char_num_hidden_layers: int = 4
+    char_num_attention_heads: int = 16
+    char_num_key_value_heads: int | None = None
+
+    use_char_position_ids: bool = False
+
+    has_char_lm_head: bool = False
+    has_cle_lm_head: bool = False
+    has_distogram_lm_head: bool = False
+
+    cle_vocab_size: int = 26
+
+    distogram_bins_num: int = 64
+    distogram_intermediate_size: int = 32
+    distogram_chunk_size: int = 0  # 0 = no chunking (compute full bxL×L at once)
+
     def __post_init__(self, **kwargs):
+        # Default char KV heads to char query heads (MHA) when unspecified.
+        if self.char_num_key_value_heads is None:
+            self.char_num_key_value_heads = self.char_num_attention_heads
         if self.head_dim is None:
             self.head_dim = self.hidden_size // self.num_attention_heads
         if self.num_key_value_heads is None:
@@ -79,11 +184,49 @@ class XYZConfig(PreTrainedConfig):
 
     def validate_architecture(self):
         """Part of `@strict`-powered validation. Validates the architecture of the config."""
+        # Ensure char_hidden_size is compatible with (char_num_attention_heads, head_dim).
+        if self.has_characterization:
+            if self.char_hidden_size != self.char_num_attention_heads * self.head_dim:
+                raise ValueError(
+                    f"The char hidden size ({self.char_hidden_size}) must equal "
+                    f"char_num_attention_heads ({self.char_num_attention_heads}) × head_dim ({self.head_dim})."
+                )
         if self.hidden_size % self.num_attention_heads != 0:
             raise ValueError(
                 f"The hidden size ({self.hidden_size}) is not a multiple of the number of attention "
                 f"heads ({self.num_attention_heads})."
             )
+
+    @contextlib.contextmanager
+    def tokenization(self):
+        """Context manager that yields *self* with token-level config active.
+
+        This is a no-op passthrough — the inherited Llama fields already hold
+        the token-level values.  Provided for symmetry with ``characterization``.
+        """
+        yield self
+
+    @contextlib.contextmanager
+    def characterization(self):
+        """Context manager that temporarily swaps token-level fields with
+        char-level equivalents so that ``XYZDecoderLayer`` / ``XYZDecoderLayers``
+        can be constructed or invoked with char-granularity dimensions.
+
+        On exit, all fields are restored to their original (token-level) values.
+        """
+        with attr(
+            self,
+            hidden_size=self.char_hidden_size,
+            intermediate_size=self.char_intermediate_size,
+            num_hidden_layers=self.char_num_hidden_layers,
+            num_attention_heads=self.char_num_attention_heads,
+            num_key_value_heads=self.char_num_key_value_heads,
+        ):
+            yield self
+
+    @property
+    def has_characterization(self):
+        return any([self.has_char_lm_head, self.has_cle_lm_head, self.has_distogram_lm_head])
 
 
 __all__ = ["XYZConfig"]

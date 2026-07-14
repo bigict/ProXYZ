@@ -50,7 +50,7 @@ class XYZProcessor(ProcessorMixin):
     FIM_MIDDLE = "<fim_middle>"
     FIM_TOKENS = [FIM_PREFIX, FIM_SUFFIX, FIM_MIDDLE]
 
-    def __init__(self, tokenizer, text_column: str = "text", **kwargs) -> None:
+    def __init__(self, tokenizer, text_column: str = "text", features: list[str] = None, **kwargs) -> None:
         tokenizer.add_special_tokens({"additional_special_tokens": self.FIM_TOKENS})
         logger.info(f"Added FIM tokens: {self.FIM_TOKENS} to tokenizer. (vocabu size: {len(tokenizer)})")
 
@@ -60,13 +60,21 @@ class XYZProcessor(ProcessorMixin):
         super().__init__(tokenizer, **kwargs)
 
         self.text_column = text_column
+        self.features = features
         self.ignore_index = kwargs.get("ignore_index", -100)
+
+        self.distogram_bins = torch.linspace(
+            kwargs.get("distogram_bins_min", 2.3125),
+            kwargs.get("distogram_bins_max", 21.6875),
+            steps=kwargs.get("distogram_bins_num", 64) - 1,
+        )
 
     def __call__(
         self,
         examples: dict,
         *,
         bpe_dropout: float | None = None,
+        char_apply: bool = False,
         fim_apply: bool = False,
         fim_spm_rate: float = 0.5,
         fim_sft_style: bool = False,
@@ -86,6 +94,45 @@ class XYZProcessor(ProcessorMixin):
             fim_sft_style=fim_sft_style,
             generate=generate,
         )
+        if char_apply:
+            tokenized.update(
+                self.to_characterization(
+                    examples,
+                    tokenized,
+                    fim_apply=fim_apply,
+                    fim_sft_style=fim_sft_style,
+                    generate=generate,
+                )
+            )
+            # del tokenized["offset_mapping"]
+
+        # copy features
+        if self.features is not None:
+
+            def feat_collate(feat, is_label: bool = False):
+                if isinstance(feat, tuple):
+                    return tuple(feat_collate(feat[t]) for t in range(len(feat)))
+                max_len = max(feat[k].shape[0] for k in range(len(feat)))
+                for k in range(len(feat)):
+                    pad = feat[k].new_full(
+                        (max_len - feat[k].shape[0], *feat[k].shape[1:]),
+                        self.ignore_index if is_label else 0,
+                    )
+                    feat[k] = torch.cat((feat[k], pad))
+                return torch.stack(feat)
+
+            for column in self.features:
+                if column in examples:
+                    tokenized[column] = feat_collate(examples[column], "labels" in column)
+
+            # FIX: move to the Trainer to save memory.
+            if "distogram_labels" in self.features:
+                if "distogram_labels" in tokenized:
+                    pseudo_beta, pseudo_beta_mask = tokenized["distogram_labels"]
+                    tokenized["distogram_labels"] = torch.cat((pseudo_beta, pseudo_beta_mask[..., None]), dim=-1)
+            #         tokenized["distogram_labels"] = self.to_distogram(
+            #             *tokenized["distogram_labels"]
+            #         )
 
         return tokenized
 
@@ -110,6 +157,62 @@ class XYZProcessor(ProcessorMixin):
             )
         )
         return tokenized
+
+    def to_characterization(
+        self,
+        examples: dict,
+        tokenized: dict,
+        bpe_dropout: float = 1.0,
+        fim_apply: bool = False,
+        fim_sft_style: bool = False,
+        generate: bool = False,
+    ) -> dict:
+        assert "offset_mapping" in tokenized and "attention_mask" in tokenized
+
+        characterized = {}
+        for k, v in self._tokenize_with_dropout(
+            examples,
+            bpe_dropout=bpe_dropout,
+            prefix="char_",
+            fim_apply=fim_apply,
+            fim_sft_style=fim_sft_style,
+            generate=generate,
+        ).items():
+            if torch.is_tensor(v):
+                v = v.to(device=tokenized["offset_mapping"].device)
+            characterized[k] = v
+
+        # Align characters with tokenized *text*
+        # NOTE: special token is treat as one char
+        # NOTE: pad offset_mapping with the maxinum offset
+        char_offset_mapping = characterized["char_offset_mapping"].where(
+            characterized["char_attention_mask"][..., None] > 0, characterized["char_offset_mapping"].max() + 1
+        )
+        offset_mapping = tokenized["offset_mapping"].where(
+            tokenized["attention_mask"][..., None] > 0, tokenized["offset_mapping"].max() + 1
+        )
+        token_to_char_map = torch.searchsorted(
+            char_offset_mapping.transpose(-1, -2).contiguous(),
+            offset_mapping.transpose(-1, -2).contiguous(),
+            right=True,
+        )
+        token_to_char_cnt = token_to_char_map[:, 1, :] - token_to_char_map[:, 0, :] + 1
+        characterized["repr_char_idx"] = token_to_char_cnt.cumsum(1) - 1
+        characterized["repr_char_idx"] = characterized["repr_char_idx"].where(tokenized["attention_mask"] > 0, 0)
+        # characterized["char_to_token_mask"] = torch.arange(self.max_chars_within_token).view(
+        #     1, 1, self.max_chars_within_token
+        # )
+        # characterized["char_to_token_mask"] = (
+        #     characterized["char_to_token_mask"] < token_to_char_cnt[:, :, None]
+        # ).where(tokenized["attention_mask"][:, :, None] > 0, 0)
+        # characterized["char_to_token_idx"] = torch.searchsorted(
+        #     tokenized["offset_mapping"][:, :, 0].contiguous(),
+        #     characterized["char_offset_mapping"][:, :, 0].contiguous(),
+        #     right=True,
+        # ) - 1
+
+        del characterized["char_offset_mapping"]
+        return characterized
 
     def to_example(self, input_ids: torch.LongTensor) -> dict:
         text = self.tokenizer.decode(input_ids.tolist(), skip_special_tokens=False)
@@ -165,6 +268,39 @@ class XYZProcessor(ProcessorMixin):
                 first, second = prefix, suffix
 
             examples[self.text_column][idx] = first_tag + first + second_tag + second + self.FIM_MIDDLE + middle
+            if self.features is not None:
+
+                def feat_fim(feat, is_label: bool = False):
+                    pad = feat.new_full((1, *feat.shape[1:]), self.ignore_index if is_label else 0)
+                    if is_spm:
+                        return torch.cat(
+                            (
+                                pad,
+                                feat[cut2:, ...],
+                                pad,
+                                feat[:cut1, ...],
+                                pad,
+                                feat[cut1:cut2, ...],
+                            )
+                        )
+                    return torch.cat(
+                        (
+                            pad,
+                            feat[:cut1, ...],
+                            pad,
+                            feat[cut2:, ...],
+                            pad,
+                            feat[cut1:cut2, ...],
+                        )
+                    )
+
+                for column in self.features:
+                    if column in examples:
+                        if isinstance(examples[column], tuple):
+                            for t in range(len(examples[column])):
+                                examples[column][t][idx] = feat_fim(examples[column][t][idx])
+                        else:
+                            examples[column][idx] = feat_fim(examples[column][idx], "labels" in column)
         return examples
 
     def apply_crop(self, examples: dict, max_length: int | None = None) -> dict:
@@ -174,6 +310,18 @@ class XYZProcessor(ProcessorMixin):
                 cut = random.randint(0, n - max_length)
                 text = text[cut : cut + max_length]
                 examples[self.text_column][idx] = text
+                if self.features is not None:
+
+                    def feat_crop(feat):
+                        return feat[cut : cut + max_length, ...]
+
+                    for column in self.features:
+                        if column in examples:
+                            if isinstance(examples[column], tuple):
+                                for t in range(len(examples[column])):
+                                    examples[column][t][idx] = feat_crop(examples[column][t][idx])
+                            else:
+                                examples[column][idx] = feat_crop(examples[column][idx])
         return examples
 
     def apply_wrap(self, examples: dict, add_eos_token: bool = True) -> dict:
@@ -182,7 +330,30 @@ class XYZProcessor(ProcessorMixin):
             if add_eos_token:
                 text = f"{text}{self.tokenizer.eos_token}"
             examples[self.text_column][idx] = text
+            if self.features is not None:
+
+                def feat_wrap(feat, is_label: bool = False):
+                    pad = feat.new_full((1, *feat.shape[1:]), self.ignore_index if is_label else 0)
+                    if add_eos_token:
+                        return torch.cat((pad, feat, pad))
+                    return torch.cat((pad, feat))
+
+                for column in self.features:
+                    if column in examples:
+                        if isinstance(examples[column], tuple):
+                            for t in range(len(examples[column])):
+                                examples[column][t][idx] = feat_wrap(examples[column][t][idx])
+                        else:
+                            examples[column][idx] = feat_wrap(examples[column][idx], "labels" in column)
         return examples
+
+    def to_distogram(self, pseudo_beta, pseudo_beta_mask):
+        distogram_labels = torch.cdist(pseudo_beta, pseudo_beta)
+        distogram_bins = self.distogram_bins.to(pseudo_beta.device)
+        distogram_labels = (distogram_labels[..., None] > distogram_bins).sum(-1)
+        return distogram_labels.where(
+            pseudo_beta_mask[..., :, None] * pseudo_beta_mask[..., None, :] > 0, self.ignore_index
+        )
 
 
 __all__ = ["XYZProcessor"]

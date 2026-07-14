@@ -23,6 +23,9 @@ from proxyz.utils import cache, env
 logger = logging.getLogger(__name__)
 
 
+cle_vocab_size = len(alphabet.I3DSequence.alphabet)
+
+
 def line_iterator(file_paths: Sequence[str], batch_size=64):
     batch = []
 

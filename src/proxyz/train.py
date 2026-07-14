@@ -89,6 +89,50 @@ from proxyz.utils import dict2object
     help="Model Grouped-Query Attention (GQA) for speed.",
 )
 @click.option(
+    "--model_char_hidden_size",
+    type=int,
+    default=768,
+    help="Character: Model width.",
+)
+@click.option(
+    "--model_char_intermediate_size",
+    type=int,
+    default=2064,
+    help="Character: Model SwiGLU hidden dimension (usually ~8/3 of hidden_size).",
+)
+@click.option(
+    "--model_char_num_hidden_layers",
+    type=int,
+    default=2,
+    help="Character: Model depth.",
+)
+@click.option(
+    "--model_char_num_attention_heads",
+    type=int,
+    default=6,
+    help="Character: Model attention heads.",
+)
+@click.option(
+    "--model_use_char_position_ids",
+    is_flag=True,
+    help="Character: Model gather position_ids from char_position_ids",
+)
+@click.option(
+    "--model_has_char_lm_head",
+    is_flag=True,
+    help="Character: Model has char_lm_head",
+)
+@click.option(
+    "--model_has_cle_lm_head",
+    is_flag=True,
+    help="Character: Model has cle_lm_head",
+)
+@click.option(
+    "--model_has_distogram_lm_head",
+    is_flag=True,
+    help="Character: Model has distogram_lm_head",
+)
+@click.option(
     "--max_position_embeddings", type=int, default=4096, help="Context window length."
 )
 @click.option(
@@ -210,6 +254,14 @@ def main(**args):
 
     random.seed(args.random_seed)
 
+    features = [
+        f"{lm_head_name}_labels" for has_lm_head, lm_head_name in (
+            (args.model_has_char_lm_head, "char"),
+            (args.model_has_cle_lm_head, "cle"),
+            (args.model_has_distogram_lm_head, "distogram"),
+        ) if has_lm_head
+    ]
+
     # ==========================================
     # 0. CHECK DATA SOURCE IS PROVIDED
     # ==========================================
@@ -235,7 +287,7 @@ def main(**args):
         eos_token="[EOS]",
     )
     processor = XYZProcessor(
-        tokenizer=tokenizer, text_column=args.text_column
+        tokenizer=tokenizer, text_column=args.text_column, features=features
     )
 
     # Ensure the embedding layer matches this size exactly
@@ -264,6 +316,14 @@ def main(**args):
         attn_implementation=args.attn_implementation,
         torch_dtype=torch.bfloat16,
         tie_word_embeddings=False,
+        char_hidden_size=args.model_char_hidden_size,
+        char_intermediate_size=args.model_char_intermediate_size,
+        char_num_hidden_layers=args.model_char_num_hidden_layers,
+        char_num_attention_heads=args.model_char_num_attention_heads,
+        use_char_position_ids=args.model_use_char_position_ids,
+        has_char_lm_head=args.model_has_char_lm_head,
+        has_cle_lm_head=args.model_has_cle_lm_head,
+        has_distogram_lm_head=args.model_has_distogram_lm_head,
     )
     model = XYZForCausalLM(config)
 
@@ -276,6 +336,8 @@ def main(**args):
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"--- Dense DeepSeek-Style Model ---")
+        if config.has_characterization:
+            print("Use U-net style XYZForCausalLM instead of standard Llama attention.")
         print(f"Attention backend:   {args.attn_implementation}")
         print(f"Total Parameters:    {total_params:,}")
         print(f"Trainable Parameters: {trainable_params:,}")
@@ -298,6 +360,7 @@ def main(**args):
         examples = processor(
             examples,
             bpe_dropout=args.tokenizer_bpe_dropout,
+            char_apply=config.has_characterization,
             fim_apply=fim_apply,
             fim_spm_rate=args.fim_spm_rate,
             fim_sft_style=args.fim_sft_style,
@@ -457,6 +520,7 @@ def main(**args):
         per_device_eval_batch_size=args.per_device_train_batch_size,
         eval_accumulation_steps=args.gradient_accumulation_steps,
         eval_on_start=True if args.eval_files else False,
+        label_names=["labels"] + features,
         prediction_loss_only=True,
         bf16=use_cuda,                                # bf16 is preferred over fp16 on modern GPUs
         ddp_find_unused_parameters=False,             # disabled warning

@@ -177,7 +177,7 @@ def main(**args):
             run_esmfold(
                 [sequence for _, sequence in data[j: j+8]],
                 path_to_esmfold_out=args.output_dir,
-                suffix=f"{i}_{j}",
+                suffix=f"{i}_{j}.pdb",
                 keep_outputs=True,
             )
 

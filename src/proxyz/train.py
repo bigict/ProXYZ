@@ -18,7 +18,7 @@ from transformers import (
 )
 from datasets import Dataset, load_dataset
 
-from proxyz.utils import dict2object
+from proxyz.utils import dict2object, compose
 from proxyz.data import dataset
 
 
@@ -191,6 +191,11 @@ from proxyz.data import dataset
     "Remaining use PSM format (prefix-suffix-middle).",
 )
 @click.option(
+    "--fim_sft_style",
+    is_flag=True,
+    help="Only the tokens after <middle> has loss.",
+)
+@click.option(
     "--eval_strategy",
     type=click.Choice(["no", "steps", "epoch"]),
     default="steps",
@@ -340,7 +345,11 @@ def main(**args):
     # ==========================================
     # 3. PREPARE YOUR DATASET
     # ==========================================
-    max_len = config.max_position_embeddings
+    def apply_crop(text, max_length):
+        if len(text) > max_length:
+            cut = random.randint(0, len(text) - max_length)
+            text = text[cut: cut + max_length]
+        return text
 
     def apply_fim(content):
         """Split content into prefix/middle/suffix and rearrange for FIM training.
@@ -363,10 +372,21 @@ def main(**args):
         return first_tag + first + second_tag + second + dataset.FIM_MIDDLE + middle
 
     def tokenize_function(examples):
-        if random.random() < args.fim_rate:
-            text_process_fn = apply_fim
+        do_fim = random.random() < args.fim_rate
+
+        if do_fim:
+            text_process_fn = compose(
+                apply_fim,
+                functools.partial(
+                    apply_crop, max_length=args.max_position_embeddings - 5
+                )
+            )
         else:
-            text_process_fn = lambda x: x
+            text_process_fn = compose(
+                functools.partial(
+                    apply_crop, max_length=args.max_position_embeddings - 2
+                )
+            )
 
         wrapped = [
             f"{tokenizer.bos_token}{text_process_fn(text)}{tokenizer.eos_token}"
@@ -377,11 +397,17 @@ def main(**args):
             truncation=True,
             return_tensors="pt",
             padding=True,
-            max_length=max_len
         )
         tokenized["labels"] = tokenized["input_ids"].where(
             tokenized["attention_mask"] > 0, -100
         )
+        if do_fim and args.fim_sft_style:
+            middle_pos = (
+                tokenized["labels"] == tokenizer.convert_tokens_to_ids(dataset.FIM_MIDDLE)
+            ).cumsum(1)
+            tokenized["labels"] = tokenized["labels"].where(
+                middle_pos.cumsum(1) > 1, -100  # the <fim_middle> is excluded
+            )
 
         return tokenized
 

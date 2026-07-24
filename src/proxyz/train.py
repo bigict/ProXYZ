@@ -170,7 +170,7 @@ from proxyz.data import dataset
 @click.option("--logging_steps", type=int, default=10, help="Log every N steps.")
 @click.option("--save_steps", type=int, default=500, help="Checkpoint every N steps.")
 @click.option(
-    "--max_token_length",
+    "--max_sequence_length",
     type=int,
     default=None,
     help="If set, randomly crop sequences longer than this to a subsequence of this length. "
@@ -371,21 +371,21 @@ def main(**args):
 
         return first_tag + first + second_tag + second + dataset.FIM_MIDDLE + middle
 
+    max_sequence_length = args.max_sequence_length
+    if max_sequence_length is None:
+        max_sequence_length = args.max_position_embeddings
+
     def tokenize_function(examples):
         do_fim = random.random() < args.fim_rate
 
         if do_fim:
             text_process_fn = compose(
                 apply_fim,
-                functools.partial(
-                    apply_crop, max_length=args.max_position_embeddings - 5
-                )
+                functools.partial(apply_crop, max_length=max_sequence_length - 5)
             )
         else:
             text_process_fn = compose(
-                functools.partial(
-                    apply_crop, max_length=args.max_position_embeddings - 2
-                )
+                functools.partial(apply_crop, max_length=max_sequence_length - 2)
             )
 
         wrapped = [

@@ -19,7 +19,7 @@ from transformers import (
 from datasets import Dataset, load_dataset
 
 from proxyz.utils import dict2object, compose
-from proxyz.data import dataset
+from proxyz.data import dataset, sampler
 
 
 @click.command(context_settings={'show_default': True})
@@ -75,9 +75,9 @@ from proxyz.data import dataset
 )
 @click.option(
     "--data_format",
-    type=click.Choice(["line", "fasta"]),
+    type=click.Choice(["line", "fasta", "pdb"]),
     default="line",
-    help="Input format: one sequence per line ('line') or FASTA ('fasta').",
+    help="Input format: one sequence per line ('line'), FASTA ('fasta') or PDB ('pdb/cif').",
 )
 @click.option("--model_hidden_size", type=int, default=2048, help="Model width.")
 @click.option(
@@ -378,6 +378,9 @@ def main(**args):
     def tokenize_function(examples):
         do_fim = random.random() < args.fim_rate
 
+        if args.data_format == "pdb":
+            examples = dataset.pdb_transform(os.environ["DATA_DIR"], examples)
+
         if do_fim:
             text_process_fn = compose(
                 apply_fim,
@@ -429,13 +432,12 @@ def main(**args):
             )
     else:
         # Load from local files
-        iterator = dataset.fasta_iterator if args.data_format == "fasta" else dataset.line_iterator
+        iterator = dataset.data_iterator(args.data_format)
 
         # Flatten the batched iterators into one-sequence-per-example records.
         def data_generator(data_files):
             for batch in iterator(data_files):
-                for seq in batch:
-                    yield {"text": seq}
+                yield from batch
 
         train_dataset = Dataset.from_generator(
             functools.partial(data_generator, args.data_files)
@@ -445,6 +447,14 @@ def main(**args):
             eval_dataset = Dataset.from_generator(
                 functools.partial(data_generator, args.eval_files)
             )
+
+    # Load cluster information and compute sampling weights if cluster files provided
+    train_sampler = None
+    if args.cluster_files:
+        train_sampler = sampler.from_cluster_files(train_dataset, args.cluster_files)
+        if args.verbose:
+            print(f"--- Cluster-based sampling ---")
+            print(f"Clusters: {len(train_sampler):,}")
 
     # Apply tokenization
     def tokenize_dataset(dataset):
@@ -460,54 +470,6 @@ def main(**args):
         if eval_dataset:
             print(f"--- Eval dataset ---")
             print(f"Examples: {len(eval_dataset):,}")
-
-    # Load cluster information and compute sampling weights if cluster files provided
-    train_sampler = None
-    if args.cluster_files:
-        # Load all cluster files and build mapping: data_row_id -> cluster_id
-        cluster_map = {}  # data_row_id -> cluster_id
-        for cluster_file in args.cluster_files:
-            with open(cluster_file, 'r') as f:
-                for line in f:
-                    parts = line.strip().split()
-                    if len(parts) >= 2:
-                        cluster_id = parts[0]
-                        data_row_id = int(parts[1])
-                        cluster_map[data_row_id] = cluster_id
-        
-        # Count cluster sizes
-        cluster_sizes = defaultdict(int)
-        for data_row_id, cluster_id in cluster_map.items():
-            if data_row_id < len(train_dataset):  # Only count valid indices
-                cluster_sizes[cluster_id] += 1
-        
-        # Compute sampling weights: n / (1 + log(n)) for each cluster
-        cluster_weights = {}
-        for cluster_id, n in cluster_sizes.items():
-            cluster_weights[cluster_id] = 1 / (1 + math.log(n))
-        
-        # Assign weights to each sample
-        sample_weights = []
-        for i in range(len(train_dataset)):
-            if i in cluster_map:
-                cluster_id = cluster_map[i]
-                weight = cluster_weights[cluster_id]
-                sample_weights.append(weight)
-            else:
-                # If no cluster info, use uniform weight (1.0)
-                sample_weights.append(1.0)
-        
-        # Create WeightedRandomSampler
-        train_sampler = WeightedRandomSampler(
-            weights=sample_weights,
-            num_samples=len(sample_weights),
-            replacement=True
-        )
-        
-        if args.verbose:
-            print(f"--- Cluster-based sampling ---")
-            print(f"Clusters: {len(cluster_sizes):,}")
-            print(f"Samples with cluster info: {sum(1 for w in sample_weights if w != 1.0):,}")
 
 
     # ==========================================

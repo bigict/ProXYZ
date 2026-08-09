@@ -9,12 +9,53 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     GenerationConfig,
+    LogitsProcessor,
     LogitsProcessorList,
     SuppressTokensLogitsProcessor,
 )
 
 from proxyz.data import dataset
 from proxyz.utils import dict2object
+
+
+class LengthControlLogitsProcessor(LogitsProcessor):
+    """Control generated amino-acid residue count via logits manipulation.
+
+    At each generation step the newly-produced tokens are decoded and standard
+    amino-acid characters (ACDEFGHIKLMNPQRSTVWY) are counted.  The EOS token
+    is then suppressed (min not yet reached) or forced (max reached) so that
+    every sequence in the batch satisfies the residue-length constraint.
+    """
+
+    def __init__(self, tokenizer, prompt_len, min_residues=None, max_residues=None):
+        if min_residues is not None and max_residues is not None:
+            if min_residues > max_residues:
+                raise ValueError(
+                    f"min_residues ({min_residues}) > max_residues ({max_residues})"
+                )
+        self.tokenizer = tokenizer
+        self.min_residues = min_residues
+        self.max_residues = max_residues
+        self._prompt_len = prompt_len
+
+    def __call__(self, input_ids, scores):
+        if self._prompt_len is None:
+            raise RuntimeError("LengthControlLogitsProcessor not initialised")
+
+        new_tokens = input_ids[:, self._prompt_len:]
+        batch_size = input_ids.shape[0]
+
+        for i in range(batch_size):
+            text = self.tokenizer.decode(new_tokens[i].tolist(), skip_special_tokens=False)
+            n_residues = sum(1 for c in text if c in dataset.STD_AMINO_ACIDS)
+
+            if self.min_residues is not None and n_residues < self.min_residues:
+                scores[i, self.tokenizer.eos_token_id] = -float("inf")
+            if self.max_residues is not None and n_residues >= self.max_residues:
+                scores[i, :] = -float("inf")
+                scores[i, self.tokenizer.eos_token_id] = 0.0
+
+        return scores
 
 
 @click.command(context_settings={'show_default': True})
@@ -46,6 +87,20 @@ from proxyz.utils import dict2object
     "--force_length",
     is_flag=True,
     help="Disable [EOS] stopping and generate exactly --num_tokens tokens.",
+)
+@click.option(
+    "--min_residues",
+    type=int,
+    default=None,
+    help="Minimum amino-acid residues before [EOS] is allowed. "
+    "Suppresses [EOS] until the decoded sequence reaches this length.",
+)
+@click.option(
+    "--max_residues",
+    type=int,
+    default=None,
+    help="Maximum amino-acid residues to generate. "
+    "Forces [EOS] once the decoded sequence reaches this length.",
 )
 @click.option("--temperature", type=float, default=1.0, help="Sampling temperature.")
 @click.option("--top_p", type=float, default=0.95, help="Nucleus (top-p) sampling.")
@@ -152,22 +207,40 @@ def main(**args):
     # ==========================================
     # 4. ENCODE PROMPT & GENERATE IN BATCHES
     # ==========================================
-    # Ban all tokens whose string representation contains "X" (unknown residue).
-    # This prevents the model from emitting ambiguous amino-acid placeholders.
+    # Normal generation mode
+    seed_text = f"{tokenizer.bos_token}{args.prompt}"
+    prompt_ids = tokenizer(seed_text, return_tensors="pt", add_special_tokens=False).input_ids
+
+    # Ban any token whose characters are not all standard amino acids (ACDEFGHIKLMNPQRSTVWY).
+    # Special tokens ([BOS], [EOS], …) are kept so the generation pipeline works.
     vocab = tokenizer.get_vocab()
-    suppress_ids = [tid for token, tid in vocab.items()
-                    if "X" in token and not token.startswith("[")]
+    suppress_ids = [
+        tid for token, tid in vocab.items()
+        if not (token.startswith("[") or token.startswith("<")) and any(c not in dataset.STD_AMINO_ACIDS for c in token)
+    ]
     logits_processor = LogitsProcessorList()
     if suppress_ids:
         logits_processor.append(
             SuppressTokensLogitsProcessor(suppress_tokens=suppress_ids, device=device)
         )
         if args.verbose:
-            print(f"Suppressed {len(suppress_ids)} tokens containing 'X'")
+            print(f"Suppressed {len(suppress_ids)} tokens containing non-standard residues")
 
-    # Normal generation mode
-    seed_text = f"{tokenizer.bos_token}{args.prompt}"
-    prompt_ids = tokenizer(seed_text, return_tensors="pt", add_special_tokens=False).input_ids
+    # Residue-length control: suppress/force [EOS] based on decoded amino-acid count.
+    if args.min_residues is not None or args.max_residues is not None:
+        # Tell the length-control processor how many prompt tokens to skip.
+        logits_processor.append(
+            LengthControlLogitsProcessor(
+                tokenizer=tokenizer,
+                prompt_len=prompt_ids.shape[1],
+                min_residues=args.min_residues,
+                max_residues=args.max_residues,
+            )
+        )
+        if args.verbose:
+            lo = args.min_residues if args.min_residues is not None else 0
+            hi = args.max_residues if args.max_residues is not None else float("inf")
+            print(f"Residue length control: [{lo}, {hi}]")
 
     sequences = []
     remaining = args.num_sequences

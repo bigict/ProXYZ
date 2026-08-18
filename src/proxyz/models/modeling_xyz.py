@@ -16,7 +16,11 @@ from transformers.cache_utils import Cache, DynamicCache
 from transformers.generation import GenerationMixin
 from transformers.integrations import use_kernel_forward_from_hub, use_kernel_func_from_hub, use_kernelized_func
 from transformers.masking_utils import create_causal_mask
-from transformers.modeling_layers import GenericForTokenClassification, GradientCheckpointingLayer
+from transformers.modeling_layers import (
+    GenericForSequenceClassification,
+    GenericForTokenClassification,
+    GradientCheckpointingLayer,
+)
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
@@ -478,5 +482,18 @@ class XYZForCausalLM(XYZPreTrainedModel, GenerationMixin):
         )
 
 
+class XYZForSequenceClassification(GenericForSequenceClassification, XYZPreTrainedModel):
+    pass
+
+
 class XYZForTokenClassification(GenericForTokenClassification, XYZPreTrainedModel):
     pass
+
+
+__all__ = [
+    "XYZPreTrainedModel",
+    "XYZModel",
+    "XYZForCausalLM",
+    "XYZForSequenceClassification",
+    "XYZForTokenClassification",
+]

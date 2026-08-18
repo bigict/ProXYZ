@@ -84,3 +84,6 @@ class XYZConfig(PreTrainedConfig):
                 f"The hidden size ({self.hidden_size}) is not a multiple of the number of attention "
                 f"heads ({self.num_attention_heads})."
             )
+
+
+__all__ = ["XYZConfig"]

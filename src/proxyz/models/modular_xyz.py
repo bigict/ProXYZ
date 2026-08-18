@@ -54,6 +54,10 @@ class XYZForCausalLM(LlamaForCausalLM):
     pass
 
 
+class XYZForSequenceClassification(LlamaForSequenceClassification):
+    pass
+
+
 class XYZForTokenClassification(LlamaForTokenClassification):
     pass
 
@@ -223,5 +227,11 @@ class XYZProcessor(ProcessorMixin):
 
 
 __all__ = [
+    "XYZPreTrainedModel",
+    "XYZModel",
+    "XYZForCausalLM",
+    "XYZForSequenceClassification",
+    "XYZForTokenClassification",
+    "XYZConfig",
     "XYZProcessor",
 ]

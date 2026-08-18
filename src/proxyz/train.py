@@ -10,22 +10,21 @@ from torch.utils.data import WeightedRandomSampler
 from transformers import (
     LlamaConfig,
     LlamaForCausalLM,
-    DeepseekV2Config,
-    DeepseekV2ForCausalLM,
     PreTrainedTokenizerFast,
     Trainer,
     TrainingArguments,
 )
 from datasets import Dataset, load_dataset
 
-from proxyz.utils import dict2object, compose
 from proxyz.data import dataset, sampler
+from proxyz.models import XYZConfig, XYZForCausalLM, XYZProcessor
+from proxyz.utils import dict2object
 
 
 @click.command(context_settings={'show_default': True})
 @click.argument("data_files", type=click.Path(), nargs=-1)
 @click.option(
-    "--eval_files", type=click.Path(), multiple=True, help="evaluate data files"
+    "--eval_files", type=click.Path(), multiple=True, help="Evaluate data files"
 )
 @click.option(
     "--dataset_name",
@@ -97,41 +96,6 @@ from proxyz.data import dataset, sampler
     help="Model Grouped-Query Attention (GQA) for speed.",
 )
 @click.option(
-    "--use_mla",
-    is_flag=True,
-    help="Use Multi-head Latent Attention (MLA) from DeepSeek-V2 instead of standard Llama attention.",
-)
-@click.option(
-    "--kv_lora_rank",
-    type=int,
-    default=512,
-    help="MLA: Rank for KV low-rank compression.",
-)
-@click.option(
-    "--q_lora_rank",
-    type=int,
-    default=0,
-    help="MLA: Rank for Q low-rank compression (0 to disable).",
-)
-@click.option(
-    "--qk_nope_head_dim",
-    type=int,
-    default=128,
-    help="MLA: Dimension of non-RoPE part in Q/K heads.",
-)
-@click.option(
-    "--qk_rope_head_dim",
-    type=int,
-    default=64,
-    help="MLA: Dimension of RoPE part in Q/K heads.",
-)
-@click.option(
-    "--v_head_dim",
-    type=int,
-    default=128,
-    help="MLA: Dimension of V heads.",
-)
-@click.option(
     "--max_position_embeddings", type=int, default=4096, help="Context window length."
 )
 @click.option(
@@ -150,7 +114,10 @@ from proxyz.data import dataset, sampler
     "--per_device_train_batch_size", type=int, default=4, help="Per-device batch size."
 )
 @click.option(
-    "--gradient_accumulation_steps", type=int, default=8, help="Grad accumulation steps."
+    "--gradient_accumulation_steps",
+    type=int,
+    default=8,
+    help="Grad accumulation steps."
 )
 @click.option("--learning_rate", type=float, default=3e-4, help="Peak learning rate.")
 @click.option(
@@ -201,7 +168,9 @@ from proxyz.data import dataset, sampler
     default="steps",
     help="When to run validation: 'steps' (every eval_steps), 'epoch' (end of each epoch), or 'no'.",
 )
-@click.option("--eval_steps", type=int, default=500, help="Run validation every N steps.")
+@click.option(
+    "--eval_steps", type=int, default=500, help="Run validation every N steps."
+)
 @click.option(
     "--dataloader_num_workers", type=int, default=4, help="Dataloader worker processes."
 )
@@ -272,15 +241,9 @@ def main(**args):
         bos_token="[BOS]",
         eos_token="[EOS]",
     )
-    if args.tokenizer_bpe_dropout > 0:
-        # FIXME: Turn it Off (0.0) for evaluation
-        tokenizer.backend_tokenizer.model.dropout = args.tokenizer_bpe_dropout
-
-    # Add FIM special tokens if FIM training is enabled
-    if args.fim_rate > 0:
-        fim_tokens = dataset.FIM_TOKENS
-        tokenizer.add_special_tokens({"additional_special_tokens": fim_tokens})
-        print(f"Added FIM tokens: {fim_tokens} (vocab size: {len(tokenizer)})")
+    processor = XYZProcessor(
+        tokenizer=tokenizer, text_column=args.text_column
+    )
 
     # Ensure the embedding layer matches this size exactly
     vocab_size = len(tokenizer)
@@ -297,7 +260,9 @@ def main(**args):
         intermediate_size=args.model_intermediate_size,
         num_hidden_layers=args.model_num_hidden_layers,
         num_attention_heads=args.model_num_attention_heads,
+        num_key_value_heads=args.model_num_key_value_heads,
         max_position_embeddings=args.max_position_embeddings,
+        hidden_act="silu",
         initializer_range=0.02,
         rms_norm_eps=1e-6,
         pad_token_id=tokenizer.pad_token_id,
@@ -308,25 +273,10 @@ def main(**args):
         tie_word_embeddings=False,
     )
 
-    if args.use_mla:
-        config = DeepseekV2Config(
-            **common_config,
-            kv_lora_rank=args.kv_lora_rank,
-            q_lora_rank=args.q_lora_rank,
-            qk_nope_head_dim=args.qk_nope_head_dim,
-            qk_rope_head_dim=args.qk_rope_head_dim,
-            v_head_dim=args.v_head_dim,
-        )
-        model = DeepseekV2ForCausalLM(config)
-        attn_type = "MLA (DeepSeek-V2)"
-    else:
-        config = LlamaConfig(
-            **common_config,
-            num_key_value_heads=args.model_num_key_value_heads,
-            hidden_act="silu",
-        )
-        model = LlamaForCausalLM(config)
-        attn_type = "Llama GQA"
+    config = XYZConfig(
+        **common_config,
+    )
+    model = XYZForCausalLM(config)
 
     # Ensure all parameters are bf16 — FlashAttention requires fp16 or bf16
     use_cuda = torch.cuda.is_available()
@@ -337,7 +287,6 @@ def main(**args):
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"--- Dense DeepSeek-Style Model ---")
-        print(f"Attention:           {attn_type}")
         print(f"Attention backend:   {args.attn_implementation}")
         print(f"Total Parameters:    {total_params:,}")
         print(f"Trainable Parameters: {trainable_params:,}")
@@ -345,74 +294,26 @@ def main(**args):
     # ==========================================
     # 3. PREPARE YOUR DATASET
     # ==========================================
-    def apply_crop(text, max_length):
-        if len(text) > max_length:
-            cut = random.randint(0, len(text) - max_length)
-            text = text[cut: cut + max_length]
-        return text
-
-    def apply_fim(content):
-        """Split content into prefix/middle/suffix and rearrange for FIM training.
-        Prefix or suffix may be empty, but middle is always non-empty."""
-        n = len(content)
-        cut1 = random.randint(0, n - 1)
-        cut2 = random.randint(cut1 + 1, n)
-        prefix, middle, suffix = content[:cut1], content[cut1:cut2], content[cut2:]
-
-        is_spm = random.random() < args.fim_spm_rate
-        if is_spm:
-            # SPM: <BOS><fim_suffix><suffix><fim_prefix><prefix><fim_middle><middle><EOS>
-            first_tag, second_tag = dataset.FIM_SUFFIX, dataset.FIM_PREFIX
-            first, second = suffix, prefix
-        else:
-            # PSM: <BOS><fim_prefix><prefix><fim_suffix><suffix><fim_middle><middle><EOS>
-            first_tag, second_tag = dataset.FIM_PREFIX, dataset.FIM_SUFFIX
-            first, second = prefix, suffix
-
-        return first_tag + first + second_tag + second + dataset.FIM_MIDDLE + middle
-
     max_sequence_length = args.max_sequence_length
     if max_sequence_length is None:
         max_sequence_length = args.max_position_embeddings
 
     def tokenize_function(examples):
-        do_fim = random.random() < args.fim_rate
+        fim_apply = random.random() < args.fim_rate
 
-        if args.data_format == "pdb":
-            examples = dataset.pdb_transform(os.environ["DATA_DIR"], examples)
+        transform = dataset.data_transform(args.data_format)
+        if transform is not None:
+            examples = transform(examples)
 
-        if do_fim:
-            text_process_fn = compose(
-                apply_fim,
-                functools.partial(apply_crop, max_length=max_sequence_length - 5)
-            )
-        else:
-            text_process_fn = compose(
-                functools.partial(apply_crop, max_length=max_sequence_length - 2)
-            )
-
-        wrapped = [
-            f"{tokenizer.bos_token}{text_process_fn(text)}{tokenizer.eos_token}"
-            for text in examples[args.text_column]
-        ]
-        tokenized = tokenizer(
-            wrapped,
-            truncation=True,
-            return_tensors="pt",
-            padding=True,
+        examples = processor(
+            examples,
+            bpe_dropout=args.tokenizer_bpe_dropout,
+            fim_apply=fim_apply,
+            fim_spm_rate=args.fim_spm_rate,
+            fim_sft_style=args.fim_sft_style,
+            max_length=max_sequence_length - (5 if fim_apply else 2),
         )
-        tokenized["labels"] = tokenized["input_ids"].where(
-            tokenized["attention_mask"] > 0, -100
-        )
-        if do_fim and args.fim_sft_style:
-            middle_pos = (
-                tokenized["labels"] == tokenizer.convert_tokens_to_ids(dataset.FIM_MIDDLE)
-            ).cumsum(1)
-            tokenized["labels"] = tokenized["labels"].where(
-                middle_pos.cumsum(1) > 1, -100  # the <fim_middle> is excluded
-            )
-
-        return tokenized
+        return examples
 
     # Load dataset from HuggingFace or local files
     if args.dataset_name:
@@ -471,7 +372,6 @@ def main(**args):
             print(f"--- Eval dataset ---")
             print(f"Examples: {len(eval_dataset):,}")
 
-
     # ==========================================
     # 4. TRAINING ARGUMENTS & EXECUTION
     # ==========================================
@@ -483,12 +383,12 @@ def main(**args):
 
             self.train_sampler = train_sampler
             self._logs = {}
-        
+
         def _get_train_sampler(self, train_dataset: Dataset = None):
             if self.train_sampler is not None:
                 return self.train_sampler
             return super()._get_train_sampler(train_dataset)
-        
+
         def compute_loss(
             self, model, inputs, return_outputs=False, num_items_in_batch=None
         ):
@@ -498,7 +398,10 @@ def main(**args):
 
             # Call parent compute_loss (handles label smoothing, loss scaling, etc.)
             loss, outputs = super().compute_loss(
-                model, inputs, return_outputs=True, num_items_in_batch=num_items_in_batch
+                model,
+                inputs,
+                return_outputs=True,
+                num_items_in_batch=num_items_in_batch
             )
 
             # ONLY track training metrics if the model is actively training
@@ -545,7 +448,7 @@ def main(**args):
             with torch.no_grad():
                 # Detect FIM examples: labels start with -100
                 is_fim = (
-                    labels == tokenizer.convert_tokens_to_ids(dataset.FIM_MIDDLE)
+                    labels == tokenizer.convert_tokens_to_ids(processor.FIM_MIDDLE)
                 ).any(1)
 
                 for tag, mask in [("fim", is_fim), ("std", ~is_fim)]:
@@ -582,7 +485,9 @@ def main(**args):
         save_steps=args.save_steps,
         eval_strategy=args.eval_strategy if (args.eval_files or args.dataset_eval_split) else "no",
         eval_steps=args.eval_steps if args.eval_strategy == "steps" else None,
+        per_device_eval_batch_size=args.per_device_train_batch_size,
         eval_accumulation_steps=args.gradient_accumulation_steps,
+        eval_on_start=True if args.eval_files else False,
         bf16=use_cuda,                                # bf16 is preferred over fp16 on modern GPUs
         ddp_find_unused_parameters=False,             # disabled warning
         num_train_epochs=args.num_train_epochs,
@@ -598,12 +503,11 @@ def main(**args):
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        processing_class=tokenizer,                  # transformers >=5 renamed `tokenizer`
+        processing_class=processor,                  # transformers >=5 renamed `tokenizer`
         train_sampler=train_sampler,
         preprocess_logits_for_metrics=FIMTrainer.aux_preprocess_logits_for_metrics,
         compute_metrics=FIMTrainer.aux_metric_calculator,
     )
-
 
     # ==========================================
     # 5. INITIALIZE LOGGERS & START TRAINING
@@ -637,7 +541,7 @@ def main(**args):
 
     # Save final weights and configuration
     trainer.save_model(args.output_dir)
-    tokenizer.save_pretrained(args.output_dir)
+    processor.save_pretrained(args.output_dir)
 
     # Clean up distributed process group to avoid resource leaks
     if torch.distributed.is_initialized():

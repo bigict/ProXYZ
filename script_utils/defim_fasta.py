@@ -20,9 +20,10 @@ import re
 import click
 
 from proxyz.data import dataset
+from proxyz.models import XYZProcessor
 
 
-FIM_PATTERN = re.compile("|".join(dataset.FIM_TOKENS))
+FIM_PATTERN = re.compile("|".join(XYZProcessor.FIM_TOKENS))
 
 
 def parse_fim_sequence(seq: str) -> str:
@@ -36,7 +37,7 @@ def parse_fim_sequence(seq: str) -> str:
     """
     segments = defaultdict(str)
 
-    i, state = 0, dataset.FIM_PREFIX
+    i, state = 0, XYZProcessor.FIM_PREFIX
     while True:
         m = FIM_PATTERN.search(seq[i:])
         if m:
@@ -49,7 +50,7 @@ def parse_fim_sequence(seq: str) -> str:
 
     return "".join(
         segments[fim_token] for fim_token in (
-            dataset.FIM_PREFIX, dataset.FIM_MIDDLE, dataset.FIM_SUFFIX
+            XYZProcessor.FIM_PREFIX, XYZProcessor.FIM_MIDDLE, XYZProcessor.FIM_SUFFIX
         )
     )
 

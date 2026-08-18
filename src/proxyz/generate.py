@@ -70,6 +70,11 @@ from proxyz.utils import dict2object
     default=None,
     help="Device to run on (default: cuda if available else cpu).",
 )
+@click.option(
+    "--use_cache",
+    is_flag=True,
+    help="Enable model to compute and store the key/value hidden states for past tokens",
+)
 @click.option("-v", "--verbose", is_flag=True, help="verbose output.")
 def main(**args):
     args = dict2object(**args)
@@ -146,7 +151,7 @@ def main(**args):
         top_k=args.top_k if args.top_k > 0 else None,
         eos_token_id=None if args.force_length else processor.tokenizer.eos_token_id,
         pad_token_id=processor.tokenizer.pad_token_id,
-        use_cache=True,
+        use_cache=args.use_cache,
     )
 
     # ==========================================
@@ -166,19 +171,17 @@ def main(**args):
             print(f"Suppressed {len(suppress_ids)} tokens containing 'X'")
 
     # Normal generation mode
-    seed_text = f"{tokenizer.bos_token}{args.prompt}"
-    prompt_ids = processor.tokenizer(
-        seed_text, return_tensors="pt", add_special_tokens=False
-    ).input_ids
+    seed_text = f"{processor.tokenizer.bos_token}{args.prompt}"
+    prompt_ids = processor(seed_text, generate=True)
 
     sequences = []
     remaining = args.num_sequences
     while remaining > 0:
         n = min(args.batch_size, remaining)
-        input_ids = prompt_ids.repeat(n, 1).to(device)
+        input_ids = {k: v.repeat(n, *[1]*(v.dim() - 1)).to(device) for k, v in prompt_ids.items()}
         with torch.no_grad():
             out = model.generate(
-                input_ids=input_ids,
+                **input_ids,
                 generation_config=gen_config,
                 logits_processor=logits_processor,
             )

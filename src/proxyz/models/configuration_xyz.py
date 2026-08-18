@@ -167,11 +167,12 @@ class XYZConfig(PreTrainedConfig):
     def validate_architecture(self):
         """Part of `@strict`-powered validation. Validates the architecture of the config."""
         # Ensure char_hidden_size is compatible with (char_num_attention_heads, head_dim).
-        if self.char_hidden_size != self.char_num_attention_heads * self.head_dim:
-            raise ValueError(
-                f"The char hidden size ({self.char_hidden_size}) must equal "
-                f"char_num_attention_heads ({self.char_num_attention_heads}) × head_dim ({self.head_dim})."
-            )
+        if self.has_characterization:
+            if self.char_hidden_size != self.char_num_attention_heads * self.head_dim:
+                raise ValueError(
+                    f"The char hidden size ({self.char_hidden_size}) must equal "
+                    f"char_num_attention_heads ({self.char_num_attention_heads}) × head_dim ({self.head_dim})."
+                )
         if self.hidden_size % self.num_attention_heads != 0:
             raise ValueError(
                 f"The hidden size ({self.hidden_size}) is not a multiple of the number of attention "
@@ -204,6 +205,10 @@ class XYZConfig(PreTrainedConfig):
             num_key_value_heads=self.char_num_key_value_heads,
         ):
             yield self
+
+    @property
+    def has_characterization(self):
+        return any([self.has_char_lm_head, self.has_cle_lm_head, self.has_distogram_lm_head])
 
 
 __all__ = ["XYZConfig"]

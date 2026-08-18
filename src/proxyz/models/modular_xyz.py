@@ -184,11 +184,12 @@ class XYZConfig(LlamaConfig):
 
     def validate_architecture(self):
         # Ensure char_hidden_size is compatible with (char_num_attention_heads, head_dim).
-        if self.char_hidden_size != self.char_num_attention_heads * self.head_dim:
-            raise ValueError(
-                f"The char hidden size ({self.char_hidden_size}) must equal "
-                f"char_num_attention_heads ({self.char_num_attention_heads}) × head_dim ({self.head_dim})."
-            )
+        if self.has_characterization:
+            if self.char_hidden_size != self.char_num_attention_heads * self.head_dim:
+                raise ValueError(
+                    f"The char hidden size ({self.char_hidden_size}) must equal "
+                    f"char_num_attention_heads ({self.char_num_attention_heads}) × head_dim ({self.head_dim})."
+                )
         super().validate_architecture()
 
     @contextlib.contextmanager
@@ -217,6 +218,12 @@ class XYZConfig(LlamaConfig):
             num_key_value_heads=self.char_num_key_value_heads,
         ):
             yield self
+
+    @property
+    def has_characterization(self):
+        return any(
+            [self.has_char_lm_head, self.has_cle_lm_head, self.has_distogram_lm_head]
+        )
 
 
 class XYZRMSNorm(LlamaRMSNorm):
@@ -387,25 +394,27 @@ class XYZModel(XYZPreTrainedModel):
         self.rotary_emb = XYZRotaryEmbedding(config=config)
 
         # Encoder (character granularity)
-        self.to_char_encoder = nn.Sequential(
-            nn.Linear(config.hidden_size, config.char_hidden_size, bias=False)
-        )
-        with self.config.characterization() as config:
-            self.char_encoder = XYZDecoderLayers(config)
-        self.from_char_encoder = nn.Sequential(
-            nn.Linear(config.char_hidden_size, config.hidden_size, bias=False),
-        )
+        if config.has_characterization:
+            self.to_char_encoder = nn.Sequential(
+                nn.Linear(config.hidden_size, config.char_hidden_size, bias=False)
+            )
+            with self.config.characterization() as config:
+                self.char_encoder = XYZDecoderLayers(config)
+            self.from_char_encoder = nn.Sequential(
+                nn.Linear(config.char_hidden_size, config.hidden_size, bias=False),
+            )
 
         # Trunk
         with self.config.tokenization() as config:
             self.trunk = XYZDecoderLayers(config)
 
         # Decoder (character granularity)
-        self.to_char_decoder = nn.Sequential(
-            nn.Linear(config.hidden_size, config.char_hidden_size, bias=False)
-        )
-        with self.config.characterization() as config:
-            self.char_decoder = XYZDecoderLayers(config)
+        if config.has_characterization:
+            self.to_char_decoder = nn.Sequential(
+                nn.Linear(config.hidden_size, config.char_hidden_size, bias=False)
+            )
+            with self.config.characterization() as config:
+                self.char_decoder = XYZDecoderLayers(config)
 
         self.gradient_checkpointing = False
 
@@ -483,24 +492,25 @@ class XYZModel(XYZPreTrainedModel):
                 - **past_key_values** / **char_past_key_values** — updated caches.
         """
         # character level.
-        if (char_input_ids is None) ^ (char_inputs_embeds is not None):
-            raise ValueError("You must specify exactly one of char_input_ids or char_inputs_embeds")
+        if self.config.has_characterization:
+            if (char_input_ids is None) ^ (char_inputs_embeds is not None):
+                raise ValueError("You must specify exactly one of char_input_ids or char_inputs_embeds")
 
-        if char_inputs_embeds is None:
-            char_inputs_embeds: torch.Tensor = self.to_char_encoder(self.embed_tokens(char_input_ids))
+            if char_inputs_embeds is None:
+                char_inputs_embeds: torch.Tensor = self.to_char_encoder(self.embed_tokens(char_input_ids))
 
-        # if use_cache and char_past_key_values is None:
-        #     with self.config.characterization() as config:
-        #         char_past_key_values = (
-        #             DynamicCache(config=config), DynamicCache(config=config)
-        #         )
+            # if use_cache and char_past_key_values is None:
+            #     with self.config.characterization() as config:
+            #         char_past_key_values = (
+            #             DynamicCache(config=config), DynamicCache(config=config)
+            #         )
 
-        if char_position_ids is None:
-            char_past_seen_tokens = char_past_key_values[0].get_seq_length() if char_past_key_values is not None else 0
-            char_position_ids = torch.arange(char_inputs_embeds.shape[1], device=char_inputs_embeds.device) + char_past_seen_tokens
-            char_position_ids = char_position_ids.unsqueeze(0)
+            if char_position_ids is None:
+                char_past_seen_tokens = char_past_key_values[0].get_seq_length() if char_past_key_values is not None else 0
+                char_position_ids = torch.arange(char_inputs_embeds.shape[1], device=char_inputs_embeds.device) + char_past_seen_tokens
+                char_position_ids = char_position_ids.unsqueeze(0)
 
-        char_position_embeddings = self.rotary_emb(char_inputs_embeds, position_ids=char_position_ids)
+            char_position_embeddings = self.rotary_emb(char_inputs_embeds, position_ids=char_position_ids)
 
         # token level
         if (input_ids is None) ^ (inputs_embeds is not None):
@@ -513,7 +523,7 @@ class XYZModel(XYZPreTrainedModel):
             with self.config.tokenization() as config:
                 past_key_values = DynamicCache(config=self.config)
 
-        if self.config.use_char_position_ids:  # gather from `char_position_ids`
+        if self.config.has_characterization and self.config.use_char_position_ids:  # gather from `char_position_ids`
             position_ids = char_position_ids
             if char_position_ids.shape[0] != repr_char_idx.shape[0]:
                 assert char_position_ids.shape[0] == 1
@@ -528,32 +538,33 @@ class XYZModel(XYZPreTrainedModel):
         position_embeddings = self.rotary_emb(inputs_embeds, position_ids=position_ids)
 
         # encode
-        with self.config.characterization() as config:
-            char_causal_mask = create_causal_mask(
-                config=config,
-                inputs_embeds=char_inputs_embeds,
-                attention_mask=char_attention_mask,
-                past_key_values=char_past_key_values[0] if char_past_key_values else None,
-                position_ids=char_position_ids,
-            )
-            encoder_outputs: BaseModelOutputWithPast = self.char_encoder(
-                inputs_embeds=char_inputs_embeds,
-                causal_mask=char_causal_mask,
-                position_embeddings=char_position_embeddings,
-                position_ids=char_position_ids,
-                past_key_values=char_past_key_values[0] if char_past_key_values else None,
-                use_cache=use_cache,
-                **kwargs,
+        if self.config.has_characterization:
+            with self.config.characterization() as config:
+                char_causal_mask = create_causal_mask(
+                    config=config,
+                    inputs_embeds=char_inputs_embeds,
+                    attention_mask=char_attention_mask,
+                    past_key_values=char_past_key_values[0] if char_past_key_values else None,
+                    position_ids=char_position_ids,
+                )
+                encoder_outputs: BaseModelOutputWithPast = self.char_encoder(
+                    inputs_embeds=char_inputs_embeds,
+                    causal_mask=char_causal_mask,
+                    position_embeddings=char_position_embeddings,
+                    position_ids=char_position_ids,
+                    past_key_values=char_past_key_values[0] if char_past_key_values else None,
+                    use_cache=use_cache,
+                    **kwargs,
+                )
+            inputs_embeds = inputs_embeds + self.from_char_encoder(
+                encoder_outputs.last_hidden_state.gather(
+                    1, repr_char_idx[..., None].expand(
+                        *repr_char_idx.shape, encoder_outputs.last_hidden_state.shape[2]
+                    )
+                )
             )
 
         # trunk
-        inputs_embeds = inputs_embeds + self.from_char_encoder(
-            encoder_outputs.last_hidden_state.gather(
-                1, repr_char_idx[..., None].expand(
-                    *repr_char_idx.shape, encoder_outputs.last_hidden_state.shape[2]
-                )
-            )
-        )
         with self.config.tokenization() as config:
             causal_mask = create_causal_mask(
                 config=config,
@@ -574,28 +585,34 @@ class XYZModel(XYZPreTrainedModel):
             )
 
         # decode
-        trunk_last_hidden_state = self.to_char_decoder(trunk_outputs.last_hidden_state)
-        char_inputs_embeds = encoder_outputs.last_hidden_state.scatter_add(  # skip connection
-            1, repr_char_idx[..., None].expand_as(trunk_last_hidden_state), trunk_last_hidden_state
-        )
-        with self.config.characterization() as config:
-            decoder_outputs: BaseModelOutputWithPast = self.char_decoder(
-                inputs_embeds=char_inputs_embeds,
-                causal_mask=char_causal_mask,
-                position_embeddings=char_position_embeddings,
-                position_ids=char_position_ids,
-                past_key_values=char_past_key_values[1] if char_past_key_values else None,
-                use_cache=use_cache,
-                **kwargs,
+        if self.config.has_characterization:
+            trunk_last_hidden_state = self.to_char_decoder(trunk_outputs.last_hidden_state)
+            char_inputs_embeds = encoder_outputs.last_hidden_state.scatter_add(  # skip connection
+                1, repr_char_idx[..., None].expand_as(trunk_last_hidden_state), trunk_last_hidden_state
+            )
+            with self.config.characterization() as config:
+                decoder_outputs: BaseModelOutputWithPast = self.char_decoder(
+                    inputs_embeds=char_inputs_embeds,
+                    causal_mask=char_causal_mask,
+                    position_embeddings=char_position_embeddings,
+                    position_ids=char_position_ids,
+                    past_key_values=char_past_key_values[1] if char_past_key_values else None,
+                    use_cache=use_cache,
+                    **kwargs,
+                )
+
+            return XYZModelOutputWithPast(
+                last_hidden_state=trunk_outputs.last_hidden_state,
+                past_key_values=trunk_outputs.past_key_values,
+                char_last_hidden_state=decoder_outputs.last_hidden_state,
+                char_past_key_values=(
+                    encoder_outputs.past_key_values, decoder_outputs.past_key_values
+                )
             )
 
         return XYZModelOutputWithPast(
             last_hidden_state=trunk_outputs.last_hidden_state,
             past_key_values=trunk_outputs.past_key_values,
-            char_last_hidden_state=decoder_outputs.last_hidden_state,
-            char_past_key_values=(
-                encoder_outputs.past_key_values, decoder_outputs.past_key_values
-            )
         )
 
 
@@ -786,96 +803,97 @@ class XYZForCausalLM(LlamaForCausalLM):
             )
 
         # decoder
-        char_hidden_states = outputs.char_last_hidden_state
-        # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
-        slice_indices = slice(-char_logits_to_keep, None) if isinstance(
-            char_logits_to_keep, int
-        ) else char_logits_to_keep
+        aux_loss, aux_logits = [], {}
 
-        aux_loss = []
+        if self.config.has_characterization:
+            char_hidden_states = outputs.char_last_hidden_state
+            # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
+            slice_indices = slice(-char_logits_to_keep, None) if isinstance(
+                char_logits_to_keep, int
+            ) else char_logits_to_keep
 
-        char_logits = None
-        if self.config.has_char_lm_head:
-            char_logits = self.char_lm_head(char_hidden_states[:, slice_indices, :])
-            if char_labels is not None:
-                with self.num_items_in_batch(
-                    kwargs, outputs.char_last_hidden_state.size(-2) / outputs.last_hidden_state.size(-2)
-                ):
-                    aux_loss.append(
-                        self.loss_function(
-                            logits=char_logits,
-                            labels=char_labels,
-                            vocab_size=self.config.vocab_size,
-                            **kwargs,
+            if self.config.has_char_lm_head:
+                char_logits = self.char_lm_head(char_hidden_states[:, slice_indices, :])
+                if char_labels is not None:
+                    with self.num_items_in_batch(
+                        kwargs, outputs.char_last_hidden_state.size(-2) / outputs.last_hidden_state.size(-2)
+                    ):
+                        aux_loss.append(
+                            self.loss_function(
+                                logits=char_logits,
+                                labels=char_labels,
+                                vocab_size=self.config.vocab_size,
+                                **kwargs,
+                            )
                         )
-                    )
-        cle_logits = None
-        if self.config.has_cle_lm_head:
-            cle_logits = self.cle_lm_head(char_hidden_states[:, slice_indices, :])
-            if cle_labels is not None:
-                with self.num_items_in_batch(
-                    kwargs, outputs.char_last_hidden_state.size(-2) / outputs.last_hidden_state.size(-2)
-                ):
-                    aux_loss.append(
-                        self.loss_function(
-                            logits=cle_logits,
-                            labels=cle_labels,
-                            vocab_size=26,
-                            shift_labels=cle_labels,  # FIX: Fake the `ForCausalLMLoss`
-                            **kwargs,
+                aux_logits["char_logits"] = char_logits
+            if self.config.has_cle_lm_head:
+                cle_logits = self.cle_lm_head(char_hidden_states[:, slice_indices, :])
+                if cle_labels is not None:
+                    with self.num_items_in_batch(
+                        kwargs, outputs.char_last_hidden_state.size(-2) / outputs.last_hidden_state.size(-2)
+                    ):
+                        aux_loss.append(
+                            self.loss_function(
+                                logits=cle_logits,
+                                labels=cle_labels,
+                                vocab_size=26,
+                                shift_labels=cle_labels,  # FIX: Fake the `ForCausalLMLoss`
+                                **kwargs,
+                            )
                         )
-                    )
+                aux_logits["cle_logits"] = cle_logits
 
-        distogram_logits = None
-        if self.config.has_distogram_lm_head:
-            # pairwise outer sum: (B, L, H) -> (B, L, L, H) -> (B, L, L, num_bins)
-            # h = char_hidden_states
-            # pair_repr = h.unsqueeze(1) + h.unsqueeze(2)
-            distogram_logits = self.distogram_head(char_hidden_states[:, slice_indices, :])
-            if distogram_labels is not None:
-                ignore_index = kwargs.get("ignore_index", -100)
-                # shift_distogram_labels = nn.functional.pad(
-                #     distogram_labels, (0, 1, 0, 1), value=ignore_index
-                # )
-                # shift_distogram_labels = shift_distogram_labels[..., 1:, 1:].contiguous()
-                with self.num_items_in_batch(
-                    kwargs, outputs.char_last_hidden_state.size(-2) / outputs.last_hidden_state.size(-2)
-                ):
-                    num_items_in_batch = kwargs.get("num_items_in_batch")
-                if num_items_in_batch is None:
-                    aux_loss.append(
-                        self.loss_function(
-                            logits=distogram_logits,
-                            labels=distogram_labels,
-                            vocab_size=self.config.distogram_bins_num,
-                            shift_labels=distogram_labels,  # FIX: Fake the `ForCausalLMLoss`
-                            **kwargs,
+            if self.config.has_distogram_lm_head:
+                # pairwise outer sum: (B, L, H) -> (B, L, L, H) -> (B, L, L, num_bins)
+                # h = char_hidden_states
+                # pair_repr = h.unsqueeze(1) + h.unsqueeze(2)
+                distogram_logits = self.distogram_head(char_hidden_states[:, slice_indices, :])
+                if distogram_labels is not None:
+                    ignore_index = kwargs.get("ignore_index", -100)
+                    # shift_distogram_labels = nn.functional.pad(
+                    #     distogram_labels, (0, 1, 0, 1), value=ignore_index
+                    # )
+                    # shift_distogram_labels = shift_distogram_labels[..., 1:, 1:].contiguous()
+                    with self.num_items_in_batch(
+                        kwargs, outputs.char_last_hidden_state.size(-2) / outputs.last_hidden_state.size(-2)
+                    ):
+                        num_items_in_batch = kwargs.get("num_items_in_batch")
+                    if num_items_in_batch is None:
+                        aux_loss.append(
+                            self.loss_function(
+                                logits=distogram_logits,
+                                labels=distogram_labels,
+                                vocab_size=self.config.distogram_bins_num,
+                                shift_labels=distogram_labels,  # FIX: Fake the `ForCausalLMLoss`
+                                **kwargs,
+                            )
                         )
-                    )
-                else:
-                    eps = 1e-8
-                    distogram_loss = nn.functional.cross_entropy(
-                        distogram_logits.reshape(-1, self.config.distogram_bins_num),
-                        distogram_labels.reshape(-1),
-                        ignore_index=ignore_index,
-                        reduction="none",
-                    ).view_as(distogram_labels)
-                    distogram_loss = (
-                        distogram_loss.sum(-1) / ((distogram_labels != ignore_index).sum(-1) + eps)
-                    ).sum()
-                    # just in case users pass an int for num_items_in_batch, which could be the case for custom trainer
-                    if torch.is_tensor(num_items_in_batch):
-                        num_items_in_batch = num_items_in_batch.to(distogram_loss.device)
-                    aux_loss.append(distogram_loss / num_items_in_batch)
-                # aux_loss.append(
-                #     self.loss_function(
-                #         logits=distogram_logits,
-                #         labels=distogram_labels,
-                #         vocab_size=self.config.distogram_bins_num,
-                #         labels=distogram_labels,
-                #         **kwargs,
-                #     )
-                # )
+                    else:
+                        eps = 1e-8
+                        distogram_loss = nn.functional.cross_entropy(
+                            distogram_logits.reshape(-1, self.config.distogram_bins_num),
+                            distogram_labels.reshape(-1),
+                            ignore_index=ignore_index,
+                            reduction="none",
+                        ).view_as(distogram_labels)
+                        distogram_loss = (
+                            distogram_loss.sum(-1) / ((distogram_labels != ignore_index).sum(-1) + eps)
+                        ).sum()
+                        # just in case users pass an int for num_items_in_batch, which could be the case for custom trainer
+                        if torch.is_tensor(num_items_in_batch):
+                            num_items_in_batch = num_items_in_batch.to(distogram_loss.device)
+                        aux_loss.append(distogram_loss / num_items_in_batch)
+                    # aux_loss.append(
+                    #     self.loss_function(
+                    #         logits=distogram_logits,
+                    #         labels=distogram_labels,
+                    #         vocab_size=self.config.distogram_bins_num,
+                    #         labels=distogram_labels,
+                    #         **kwargs,
+                    #     )
+                    # )
+                aux_logits["distogram_logits"] = distogram_logits
 
         if loss is not None and aux_loss:
             loss = loss + sum(aux_loss)
@@ -889,12 +907,10 @@ class XYZForCausalLM(LlamaForCausalLM):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
             offset_mapping=kwargs.get("offset_mapping"),
-            char_logits=char_logits,
             char_past_key_values=outputs.char_past_key_values,
             char_hidden_states=outputs.char_hidden_states,
             char_attentions=outputs.char_attentions,
-            cle_logits=cle_logits,
-            distogram_logits=distogram_logits,
+            **aux_logits,
         )
 
     def prepare_inputs_for_generation(
@@ -918,6 +934,9 @@ class XYZForCausalLM(LlamaForCausalLM):
             is_first_iteration=is_first_iteration,
             **kwargs,
         )
+        if not self.config.has_characterization:
+            return model_inputs
+
         # append offset_mapping
         if not is_first_iteration:  # not prefill stage
             tokenized = processor.to_tokenization(

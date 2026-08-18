@@ -91,11 +91,6 @@ from proxyz.utils import dict2object
     help="Model Grouped-Query Attention (GQA) for speed.",
 )
 @click.option(
-    "--use_unet",
-    is_flag=True,
-    help="Use U-net style XYZForCausalLM instead of standard Llama attention.",
-)
-@click.option(
     "--model_char_hidden_size",
     type=int,
     default=768,
@@ -335,7 +330,15 @@ def main(**args):
         attn_implementation=args.attn_implementation,
         torch_dtype=torch.bfloat16,
         tie_word_embeddings=False,
-        keys_to_ignore_at_inference=keys_to_ignore_at_inference
+        keys_to_ignore_at_inference=keys_to_ignore_at_inference,
+        char_hidden_size=args.model_char_hidden_size,
+        char_intermediate_size=args.model_char_intermediate_size,
+        char_num_hidden_layers=args.model_char_num_hidden_layers,
+        char_num_attention_heads=args.model_char_num_attention_heads,
+        use_char_position_ids=args.model_use_char_position_ids,
+        has_char_lm_head=args.model_has_char_lm_head,
+        has_cle_lm_head=args.model_has_cle_lm_head,
+        has_distogram_lm_head=args.model_has_distogram_lm_head,
     )
     model = XYZForCausalLM(config)
 
@@ -348,6 +351,8 @@ def main(**args):
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"--- Dense DeepSeek-Style Model ---")
+        if config.has_characterization:
+            print("Use U-net style XYZForCausalLM instead of standard Llama attention.")
         print(f"Attention backend:   {args.attn_implementation}")
         print(f"Total Parameters:    {total_params:,}")
         print(f"Trainable Parameters: {trainable_params:,}")
@@ -369,7 +374,7 @@ def main(**args):
         examples = processor(
             examples,
             bpe_dropout=args.tokenizer_bpe_dropout,
-            char_apply=args.use_unet,
+            char_apply=config.has_characterization,
             fim_apply=fim_apply,
             fim_spm_rate=args.fim_spm_rate,
             fim_sft_style=args.fim_sft_style,
@@ -662,7 +667,7 @@ def main(**args):
         eval_strategy=args.eval_strategy if (args.eval_files or args.dataset_eval_split) else "no",
         eval_steps=args.eval_steps if args.eval_strategy == "steps" else None,
         per_device_eval_batch_size=args.per_device_train_batch_size,
-        eval_use_gather_object=True,
+        eval_use_gather_object=len(label_names) > 1,
         eval_accumulation_steps=args.gradient_accumulation_steps,
         eval_on_start=True if args.eval_files else False,
         batch_eval_metrics=True,
@@ -687,12 +692,12 @@ def main(**args):
         train_sampler=train_sampler,
         preprocess_logits_for_metrics=functools.partial(
             FIMTrainer.aux_preprocess_logits_for_metrics,
-            label_names=label_names,
+            label_names=label_names if len(label_names) > 1 else label_names[0],
         ),
         compute_metrics=functools.partial(
             FIMTrainer.aux_metric_calculator,
             defaultdict(list),
-            label_names=label_names,
+            label_names=label_names if len(label_names) > 1 else label_names[0],
         ),
     )
 

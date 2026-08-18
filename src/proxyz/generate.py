@@ -7,7 +7,7 @@ import click
 import torch
 from transformers import (
     AutoModelForCausalLM,
-    AutoTokenizer,
+    AutoProcessor,
     GenerationConfig,
     LogitsProcessorList,
     SuppressTokensLogitsProcessor,
@@ -100,9 +100,9 @@ def main(**args):
 
 
     model_path = resolve_model_path(args.model_dir)
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
 
-    if tokenizer.bos_token_id is None or tokenizer.eos_token_id is None:
+    if processor.tokenizer.bos_token_id is None or processor.tokenizer.eos_token_id is None:
         raise click.UsageError(
             "Tokenizer has no [BOS]/[EOS]. Retrain with the updated train.py "
             "(which adds them) or point --model_dir at such a model."
@@ -119,15 +119,15 @@ def main(**args):
         model_path,
         torch_dtype=dtype,
         attn_implementation=attn_impl,
+        trust_remote_code=True,
     )
     model = model.to(device).eval()
-    model.config.use_cache = True
 
     if args.verbose:
         print(f"--- ProXYZ Generation ---")
         print(f"Model:       {model_path}")
         print(f"Device:      {device}  dtype={dtype}  attn={attn_impl}")
-        print(f"Vocab size:  {len(tokenizer)}  bos={tokenizer.bos_token_id} eos={tokenizer.eos_token_id}")
+        print(f"Vocab size:  {len(processor.tokenizer)}  bos={processor.tokenizer.bos_token_id} eos={processor.tokenizer.eos_token_id}")
         print(f"Prompt:      {args.prompt!r}")
         mode = "exactly" if args.force_length else "up to"
         print(f"Target:      {mode} {args.num_tokens} new tokens x {args.num_sequences} seqs")
@@ -144,8 +144,8 @@ def main(**args):
         temperature=args.temperature,
         top_p=args.top_p,
         top_k=args.top_k if args.top_k > 0 else None,
-        eos_token_id=None if args.force_length else tokenizer.eos_token_id,
-        pad_token_id=tokenizer.pad_token_id,
+        eos_token_id=None if args.force_length else processor.tokenizer.eos_token_id,
+        pad_token_id=processor.tokenizer.pad_token_id,
         use_cache=True,
     )
 
@@ -154,7 +154,7 @@ def main(**args):
     # ==========================================
     # Ban all tokens whose string representation contains "X" (unknown residue).
     # This prevents the model from emitting ambiguous amino-acid placeholders.
-    vocab = tokenizer.get_vocab()
+    vocab = processor.tokenizer.get_vocab()
     suppress_ids = [tid for token, tid in vocab.items()
                     if "X" in token and not token.startswith("[")]
     logits_processor = LogitsProcessorList()
@@ -167,7 +167,9 @@ def main(**args):
 
     # Normal generation mode
     seed_text = f"{tokenizer.bos_token}{args.prompt}"
-    prompt_ids = tokenizer(seed_text, return_tensors="pt", add_special_tokens=False).input_ids
+    prompt_ids = processor.tokenizer(
+        seed_text, return_tensors="pt", add_special_tokens=False
+    ).input_ids
 
     sequences = []
     remaining = args.num_sequences
@@ -182,9 +184,14 @@ def main(**args):
             )
         for row in out:
             # Decode keeping FIM special tokens, removing only [BOS]/[EOS]/[PAD]/[UNK]
-            decoded = tokenizer.decode(row.tolist(), skip_special_tokens=False)
+            decoded = processor.tokenizer.decode(row.tolist(), skip_special_tokens=False)
             # Remove non-FIM special tokens
-            for special in [tokenizer.bos_token, tokenizer.eos_token, tokenizer.pad_token, tokenizer.unk_token]:
+            for special in [
+                processor.tokenizer.bos_token,
+                processor.tokenizer.eos_token,
+                processor.tokenizer.pad_token,
+                processor.tokenizer.unk_token
+            ]:
                 if special:
                     decoded = decoded.replace(special, "")
             # Remove whitespace (FIM tokens like <fim_prefix> don't contain spaces)

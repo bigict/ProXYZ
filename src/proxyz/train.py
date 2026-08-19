@@ -500,7 +500,6 @@ def main(**args):
         eval_steps=args.eval_steps if args.eval_strategy == "steps" else None,
         per_device_eval_batch_size=args.per_device_train_batch_size,
         eval_accumulation_steps=args.gradient_accumulation_steps,
-        eval_use_gather_object=True,
         eval_on_start=True if args.eval_files else False,
         batch_eval_metrics=True,
         bf16=use_cuda,                                # bf16 is preferred over fp16 on modern GPUs

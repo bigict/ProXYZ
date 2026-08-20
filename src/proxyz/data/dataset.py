@@ -2,6 +2,7 @@ import functools
 import itertools
 import pathlib
 from typing import Literal, Sequence, Union
+from urllib.parse import urlparse
 
 from Bio.Data.PDBData import protein_letters_3to1
 from biotite.structure import alphabet
@@ -83,11 +84,17 @@ _foldcomp_dataset = {}
 def foldcomp_dataset(file_path: str):
     from graphein.ml.datasets.foldcomp_dataset import FoldCompDataset
 
-    file_path = pathlib.Path(file_path)
+    o = urlparse(file_path)
+    if o.fragment:
+        with opener(o.fragment) as f:
+            ids = [line for line in lines(f) if not line.startswith("#")]
+    else:
+        ids = None
+    file_path = pathlib.Path(o.path)
     return FoldCompDataset(
         root=file_path.parent,
         database=file_path.name,  # name of the dataset. See: https://github.com/steineggerlab/foldcomp
-        ids=None,
+        ids=ids,
         fraction=1,
     )
 

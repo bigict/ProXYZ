@@ -396,6 +396,7 @@ def main(**args):
 
             # ONLY track training metrics if the model is actively training
             if model.training and self.compute_metrics is not None:
+                logits = outputs.logits
                 if self.preprocess_logits_for_metrics is not None:
                     logits = self.preprocess_logits_for_metrics(logits, labels)
                 for key, val in self.compute_metrics(

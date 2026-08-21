@@ -91,6 +91,50 @@ from proxyz.utils import dict2object
     help="Model Grouped-Query Attention (GQA) for speed.",
 )
 @click.option(
+    "--model_char_hidden_size",
+    type=int,
+    default=768,
+    help="Character: Model width.",
+)
+@click.option(
+    "--model_char_intermediate_size",
+    type=int,
+    default=2064,
+    help="Character: Model SwiGLU hidden dimension (usually ~8/3 of hidden_size).",
+)
+@click.option(
+    "--model_char_num_hidden_layers",
+    type=int,
+    default=2,
+    help="Character: Model depth.",
+)
+@click.option(
+    "--model_char_num_attention_heads",
+    type=int,
+    default=6,
+    help="Character: Model attention heads.",
+)
+@click.option(
+    "--model_use_char_position_ids",
+    is_flag=True,
+    help="Character: Model gather position_ids from char_position_ids",
+)
+@click.option(
+    "--model_has_char_lm_head",
+    is_flag=True,
+    help="Character: Model has char_lm_head",
+)
+@click.option(
+    "--model_has_cle_lm_head",
+    is_flag=True,
+    help="Character: Model has cle_lm_head",
+)
+@click.option(
+    "--model_has_distogram_lm_head",
+    is_flag=True,
+    help="Character: Model has distogram_lm_head",
+)
+@click.option(
     "--max_position_embeddings", type=int, default=4096, help="Context window length."
 )
 @click.option(
@@ -212,6 +256,26 @@ def main(**args):
 
     random.seed(args.random_seed)
 
+    features = []
+    label_names = [("labels", 1)]
+    keys_to_ignore_at_inference = [
+        "past_key_values", "char_past_key_values", "offset_mapping"
+    ]
+    if args.model_has_char_lm_head:
+        label_names += [("char_labels", 1)]
+    else:
+        keys_to_ignore_at_inference += ["char_logits"]
+    if args.model_has_cle_lm_head:
+        label_names += [("cle_labels", 0)]
+        features += ["cle_labels"]
+    else:
+        keys_to_ignore_at_inference += ["cle_logits"]
+    if args.model_has_distogram_lm_head:
+        label_names += [("distogram_labels", 0)]
+        features += ["distogram_labels"]
+    else:
+        keys_to_ignore_at_inference += ["distogram_logits"]
+
     # ==========================================
     # 0. CHECK DATA SOURCE IS PROVIDED
     # ==========================================
@@ -237,7 +301,7 @@ def main(**args):
         eos_token="[EOS]",
     )
     processor = XYZProcessor(
-        tokenizer=tokenizer, text_column=args.text_column
+        tokenizer=tokenizer, text_column=args.text_column, features=features
     )
 
     # Ensure the embedding layer matches this size exactly
@@ -266,6 +330,15 @@ def main(**args):
         attn_implementation=args.attn_implementation,
         torch_dtype=torch.bfloat16,
         tie_word_embeddings=False,
+        keys_to_ignore_at_inference=keys_to_ignore_at_inference,
+        char_hidden_size=args.model_char_hidden_size,
+        char_intermediate_size=args.model_char_intermediate_size,
+        char_num_hidden_layers=args.model_char_num_hidden_layers,
+        char_num_attention_heads=args.model_char_num_attention_heads,
+        use_char_position_ids=args.model_use_char_position_ids,
+        has_char_lm_head=args.model_has_char_lm_head,
+        has_cle_lm_head=args.model_has_cle_lm_head,
+        has_distogram_lm_head=args.model_has_distogram_lm_head,
     )
     model = XYZForCausalLM(config)
 
@@ -278,6 +351,8 @@ def main(**args):
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"--- Dense DeepSeek-Style Model ---")
+        if config.has_characterization:
+            print("Use U-net style XYZForCausalLM instead of standard Llama attention.")
         print(f"Attention backend:   {args.attn_implementation}")
         print(f"Total Parameters:    {total_params:,}")
         print(f"Trainable Parameters: {trainable_params:,}")
@@ -299,6 +374,7 @@ def main(**args):
         examples = processor(
             examples,
             bpe_dropout=args.tokenizer_bpe_dropout,
+            char_apply=config.has_characterization,
             fim_apply=fim_apply,
             fim_spm_rate=args.fim_spm_rate,
             fim_sft_style=args.fim_sft_style,
@@ -385,7 +461,9 @@ def main(**args):
         ):
             # Always cache data for FIM loss tracking (training and eval)
             # Cache data BEFORE calling super (which may modify inputs)
-            labels = inputs["labels"].clone()
+            labels = tuple(inputs[k].clone() for k in self.args.label_names)
+            if len(labels) == 1:
+                labels = labels[0]
 
             # Call parent compute_loss (handles label smoothing, loss scaling, etc.)
             loss, outputs = super().compute_loss(
@@ -397,7 +475,24 @@ def main(**args):
 
             # ONLY track training metrics if the model is actively training
             if model.training and self.compute_metrics is not None:
-                logits = outputs.logits
+                ignore_keys = []
+
+                module = model
+                # FIX: DistributedDataParallel
+                if not hasattr(module, "config") and hasattr(module, "module"):
+                    module = module.module
+                if hasattr(module, "config"):
+                    ignore_keys = getattr(
+                        module.config,
+                        "keys_to_ignore_at_inference",
+                        ["past_key_values"]
+                    )
+
+                logits = tuple(
+                    v for k, v in outputs.items() if k not in ignore_keys + ["loss"]
+                )
+                if len(logits) == 1:
+                    logits = logits[0]
                 if self.preprocess_logits_for_metrics is not None:
                     logits = self.preprocess_logits_for_metrics(logits, labels)
                 for key, val in self.compute_metrics(
@@ -410,6 +505,32 @@ def main(**args):
 
             return (loss, outputs) if return_outputs else loss
 
+        def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys):
+            loss, logits, labels = super().prediction_step(
+                model, inputs, prediction_loss_only, ignore_keys
+            )
+
+            def pad_across_processes(tensors, dims=None):
+                if isinstance(tensors, tuple):
+                    return tuple(
+                        map(functools.partial(pad_across_processes, dims=dims), tensors)
+                    )
+                if dims is None:
+                    dims = tensors.dim()
+                elif dims < 0:
+                    dims = dims + tensors.dim()
+                for dim in range(2, dims):
+                    tensors = self.accelerator.pad_across_processes(
+                        tensors, dim=dim, pad_index=-100
+                    )
+                return tensors
+
+            if logits is not None:
+                logits = pad_across_processes(logits, dims=-1)
+            if labels is not None:
+                labels = pad_across_processes(labels)
+            return loss, logits, labels
+
         def log(self, logs, start_time=None):
             if self._logs:
                 for key, val in self._logs.items():
@@ -421,13 +542,26 @@ def main(**args):
             super().log(logs, start_time=start_time)
 
         @classmethod
-        def aux_preprocess_logits_for_metrics(cls, logits, labels):
+        def aux_preprocess_logits_for_metrics(cls, logits, labels, label_names=None):
             loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
+            if isinstance(logits, tuple) and isinstance(labels, tuple):
+                return tuple(
+                    cls.aux_preprocess_logits_for_metrics(
+                        p, l, label_names=label_names[i] if label_names else None
+                    ) for i, (p, l) in enumerate(zip(logits, labels))
+                )
             assert not isinstance(logits, tuple), len(logits)
             assert not isinstance(labels, tuple), len(labels)
 
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
+            n_shift = 0
+            if label_names is None or label_names[1]:
+                n_shift = labels.dim() - 1
+            logits_slices = [slice(0, -1)] * n_shift
+            labels_slices = [slice(1, None)] * n_shift
+
+            shift_logits = logits[..., *logits_slices, :].contiguous()
+            shift_labels = labels[..., *labels_slices].contiguous()
+
             loss_per_token = loss_fct(
                 shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
             )
@@ -435,7 +569,7 @@ def main(**args):
 
         @classmethod
         def aux_metric_calculator(
-            cls, metrics, preds, compute_result=False, update_metrics=True, prefix="eval_"
+            cls, metrics, preds, compute_result=False, update_metrics=True, prefix="eval_", label_names=None
         ):
             """Computes metrics: n_fim / n_std, loss_fim / loss_std etc"""
             loss_per_token, labels = preds
@@ -443,7 +577,34 @@ def main(**args):
             logs = {}
 
             if isinstance(loss_per_token, tuple) and isinstance(labels, tuple):
-                assert False
+                assert len(label_names) == len(loss_per_token)
+                for i, (p, l) in enumerate(zip(loss_per_token, labels)):
+                    label, _ = label_names[i]
+                    if label.endswith("labels"):
+                        label = label[:-len("labels")]
+                    logs.update(
+                        cls.aux_metric_calculator(
+                            metrics, (p, l),
+                            update_metrics=False,
+                            prefix=f"{prefix}{label}",
+                            label_names=label_names[i],
+                        )
+                    )
+            elif isinstance(loss_per_token, list) and isinstance(labels, list):
+                assert len(loss_per_token) % len(label_names) == 0, ([l.shape for l in loss_per_token], [l.shape for l in labels], label_names)
+                gather_logs = defaultdict(list)
+
+                for g in range(len(loss_per_token) // len(label_names)):
+                    i, j = g * len(label_names), (g + 1) * len(label_names)
+                    for key, value in cls.aux_metric_calculator(
+                        metrics, (tuple(loss_per_token[i:j]), tuple(labels[i:j])),
+                        update_metrics=False,
+                        prefix=prefix,
+                        label_names=label_names,
+                    ).items():
+                        gather_logs[key].append(value)
+
+                logs.update({k: sum(v)/len(v) for k, v in gather_logs.items()})
             else:
                 with torch.no_grad():
                     # Detect FIM examples: labels start with -100
@@ -456,13 +617,18 @@ def main(**args):
                             )
                         )
                     is_fim = is_fim.any(tuple(range(1, is_fim.dim())))
+
+                    n_shift = 0
+                    if label_names is None or label_names[1]:
+                        n_shift = labels.dim() - 1
+                    labels_slices = [slice(1, None)] * n_shift
                     for tag, mask in [("fim", is_fim), ("std", ~is_fim)]:
                         # Add FIM/standard counts to logs
                         logs[f"{prefix}n_{tag}"] = mask.sum().item()
 
                         # Add FIM/standard loss to logs
                         if mask.any():
-                            shift_labels = labels[mask][..., 1:]
+                            shift_labels = labels[mask][..., *labels_slices]
                             valid = (shift_labels != -100).reshape(-1)
                             if valid.any():
                                 loss = loss_per_token[mask].reshape(-1)
@@ -501,14 +667,17 @@ def main(**args):
         eval_strategy=args.eval_strategy if (args.eval_files or args.dataset_eval_split) else "no",
         eval_steps=args.eval_steps if args.eval_strategy == "steps" else None,
         per_device_eval_batch_size=args.per_device_train_batch_size,
+        eval_use_gather_object=len(label_names) > 1,
         eval_accumulation_steps=args.gradient_accumulation_steps,
         eval_on_start=True if args.eval_files else False,
         batch_eval_metrics=True,
+        label_names=[label for label, _ in label_names],
         bf16=use_cuda,                                # bf16 is preferred over fp16 on modern GPUs
         ddp_find_unused_parameters=False,             # disabled warning
         num_train_epochs=args.num_train_epochs,
         max_steps=args.max_steps,
         dataloader_num_workers=args.dataloader_num_workers,
+        dataloader_drop_last=True,
         remove_unused_columns=False,
         report_to=report_to,                          # SwanLab + TensorBoard
         run_name=args.run_name,
@@ -521,10 +690,14 @@ def main(**args):
         eval_dataset=eval_dataset,
         processing_class=processor,                  # transformers >=5 renamed `tokenizer`
         train_sampler=train_sampler,
-        preprocess_logits_for_metrics=FIMTrainer.aux_preprocess_logits_for_metrics,
+        preprocess_logits_for_metrics=functools.partial(
+            FIMTrainer.aux_preprocess_logits_for_metrics,
+            label_names=label_names if len(label_names) > 1 else label_names[0],
+        ),
         compute_metrics=functools.partial(
             FIMTrainer.aux_metric_calculator,
             defaultdict(list),
+            label_names=label_names if len(label_names) > 1 else label_names[0],
         ),
     )
 

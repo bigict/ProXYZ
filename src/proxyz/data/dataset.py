@@ -1,4 +1,3 @@
-import functools
 import itertools
 import pathlib
 from typing import Literal, Sequence, Union
@@ -10,6 +9,7 @@ from datasets import Dataset
 import torch
 
 from proxyz.data.utils import lines, opener
+from proxyz.utils import cache
 
 
 def line_iterator(file_paths: Sequence[str], batch_size=64):
@@ -77,10 +77,7 @@ def pdb_transform(examples: dict):
     return pyg_transform(batch)
 
 
-_foldcomp_dataset = {}
-
-
-@functools.cache
+@cache
 def foldcomp_dataset(file_path: str):
     from graphein.ml.datasets.foldcomp_dataset import FoldCompDataset
 
@@ -103,7 +100,7 @@ def foldcomp_iterator(file_paths: Sequence[str], batch_size: int = 64):
     batch = []
 
     for file_path in file_paths:
-        data = foldcomp_dataset(file_path)
+        data = foldcomp_dataset(file_path, use_cache=False)
         for pid in data.ids:
             if len(batch) >= batch_size:
                 yield batch

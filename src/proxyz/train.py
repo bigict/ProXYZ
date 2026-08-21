@@ -443,6 +443,7 @@ def main(**args):
         num_train_epochs=args.num_train_epochs,
         max_steps=args.max_steps,
         dataloader_num_workers=args.dataloader_num_workers,
+        dataloader_persistent_workers=True,
         remove_unused_columns=False,
         report_to=report_to,                          # SwanLab + TensorBoard
         run_name=args.run_name,

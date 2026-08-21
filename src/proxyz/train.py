@@ -392,10 +392,24 @@ def main(**args):
             )
 
             # ONLY track training metrics if the model is actively training
+            if (
+                self.args.average_tokens_across_devices
+                and (self.model_accepts_loss_kwargs or self.compute_loss_func)
+                and num_items_in_batch is not None
+            ):
+                # TP and EP-as-TP ranks see replicated batches; `num_processes` over-counts
+                # them by `tp_size`. Mirror the divisor used in `_get_num_items_in_batch`.
+                loss_scale = self.accelerator.num_processes
+                if (pc := getattr(self.accelerator, "parallelism_config", None)) is not None:
+                    loss_scale //= pc.tp_size
+                loss_scale = loss_scale if self.args.n_gpu <= 1 else self.args.n_gpu
+            else:
+                loss_scale = 1
+
             prefix = "" if model.training else "eval_"
             for key, val in outputs.items():
                 if key.endswith("_loss") and val is not None:
-                    key, val = f"{prefix}{key}", val.detach().item()
+                    key, val = f"{prefix}{key}", val.detach().item() * loss_scale
                     if key in self._logs:
                         self._logs[key].append(val)
                     else:

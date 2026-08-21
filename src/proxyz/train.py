@@ -68,9 +68,10 @@ from proxyz.utils import dict2object
 )
 @click.option(
     "--data_format",
-    type=click.Choice(["line", "fasta", "pdb"]),
+    type=click.Choice(["line", "fasta", "foldcomp", "pdb"]),
     default="line",
-    help="Input format: one sequence per line ('line'), FASTA ('fasta') or PDB ('pdb/cif').",
+    help="Input format: one sequence per line ('line'), FASTA ('fasta'),"
+    "Foldcomp ('foldcomp') or PDB ('pdb/cif').",
 )
 @click.option("--model_hidden_size", type=int, default=2048, help="Model width.")
 @click.option(

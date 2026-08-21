@@ -1,8 +1,8 @@
 import os
-import random
+from collections import defaultdict
 import functools
 import math
-from collections import defaultdict
+import random
 
 import click
 from datasets import Dataset, load_dataset
@@ -383,10 +383,6 @@ def main(**args):
         def compute_loss(
             self, model, inputs, return_outputs=False, num_items_in_batch=None
         ):
-            # Always cache data for FIM loss tracking (training and eval)
-            # Cache data BEFORE calling super (which may modify inputs)
-            labels = inputs["labels"].clone()
-
             # Call parent compute_loss (handles label smoothing, loss scaling, etc.)
             loss, outputs = super().compute_loss(
                 model,
@@ -396,13 +392,10 @@ def main(**args):
             )
 
             # ONLY track training metrics if the model is actively training
-            if model.training and self.compute_metrics is not None:
-                logits = outputs.logits
-                if self.preprocess_logits_for_metrics is not None:
-                    logits = self.preprocess_logits_for_metrics(logits, labels)
-                for key, val in self.compute_metrics(
-                    (logits, labels), update_metrics=False, prefix=""
-                ).items():
+            prefix = "" if model.training else "eval_"
+            for key, val in outputs.items():
+                if key.endswith("_loss") and val is not None:
+                    key, val = f"{prefix}{key}", val.detach().item()
                     if key in self._logs:
                         self._logs[key].append(val)
                     else:
@@ -419,65 +412,6 @@ def main(**args):
                 self._logs = {}
 
             super().log(logs, start_time=start_time)
-
-        @classmethod
-        def aux_preprocess_logits_for_metrics(cls, logits, labels):
-            loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
-            assert not isinstance(logits, tuple), len(logits)
-            assert not isinstance(labels, tuple), len(labels)
-
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            loss_per_token = loss_fct(
-                shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
-            )
-            return loss_per_token.view(-1, *shift_labels.shape[1:])
-
-        @classmethod
-        def aux_metric_calculator(
-            cls, metrics, preds, compute_result=False, update_metrics=True, prefix="eval_"
-        ):
-            """Computes metrics: n_fim / n_std, loss_fim / loss_std etc"""
-            loss_per_token, labels = preds
-
-            logs = {}
-
-            if isinstance(loss_per_token, tuple) and isinstance(labels, tuple):
-                assert False
-            else:
-                with torch.no_grad():
-                    # Detect FIM examples: labels start with -100
-                    if args.fim_sft_style:
-                        is_fim = (labels[..., 0:1] == -100)
-                    else:
-                        is_fim = (
-                            labels == processor.tokenizer.convert_tokens_to_ids(
-                                processor.FIM_MIDDLE
-                            )
-                        )
-                    is_fim = is_fim.any(tuple(range(1, is_fim.dim())))
-                    for tag, mask in [("fim", is_fim), ("std", ~is_fim)]:
-                        # Add FIM/standard counts to logs
-                        logs[f"{prefix}n_{tag}"] = mask.sum().item()
-
-                        # Add FIM/standard loss to logs
-                        if mask.any():
-                            shift_labels = labels[mask][..., 1:]
-                            valid = (shift_labels != -100).reshape(-1)
-                            if valid.any():
-                                loss = loss_per_token[mask].reshape(-1)
-                                logs[f"{prefix}loss_{tag}"] = loss[valid].mean().item()
-
-            if update_metrics:
-                for k, v in logs.items():
-                    metrics[k].append(v)
-
-                if compute_result:
-                    logs = {k: sum(v)/len(v) for k, v in metrics.items()}
-                    metrics.clear()
-                    return logs
-
-            return logs
 
     report_to = list(args.report_to) if args.report_to else []
     if report_to == ["none"] or report_to == ["all"]:
@@ -503,7 +437,7 @@ def main(**args):
         per_device_eval_batch_size=args.per_device_train_batch_size,
         eval_accumulation_steps=args.gradient_accumulation_steps,
         eval_on_start=True if args.eval_files else False,
-        batch_eval_metrics=True,
+        prediction_loss_only=True,
         bf16=use_cuda,                                # bf16 is preferred over fp16 on modern GPUs
         ddp_find_unused_parameters=False,             # disabled warning
         num_train_epochs=args.num_train_epochs,
@@ -521,11 +455,6 @@ def main(**args):
         eval_dataset=eval_dataset,
         processing_class=processor,                  # transformers >=5 renamed `tokenizer`
         train_sampler=train_sampler,
-        preprocess_logits_for_metrics=FIMTrainer.aux_preprocess_logits_for_metrics,
-        compute_metrics=functools.partial(
-            FIMTrainer.aux_metric_calculator,
-            defaultdict(list),
-        ),
     )
 
     # ==========================================

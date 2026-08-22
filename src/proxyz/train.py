@@ -1,13 +1,11 @@
 import os
 from collections import defaultdict
 import functools
-import math
 import random
 
 import click
 from datasets import Dataset, load_dataset
 import torch
-from torch.utils.data import WeightedRandomSampler
 from transformers import PreTrainedTokenizerFast, Trainer, TrainingArguments
 
 from proxyz.data import dataset, sampler
@@ -296,6 +294,7 @@ def main(**args):
         if transform is not None:
             examples = transform(examples)
 
+        batch_size = len(examples[args.text_column])
         examples = processor(
             examples,
             bpe_dropout=args.tokenizer_bpe_dropout,
@@ -304,6 +303,7 @@ def main(**args):
             fim_sft_style=args.fim_sft_style,
             max_length=max_sequence_length - (5 if fim_apply else 2),
         )
+        examples["is_fim"] = [fim_apply] * batch_size
         return examples
 
     # Load dataset from HuggingFace or local files
@@ -373,7 +373,7 @@ def main(**args):
             super().__init__(**kwargs)
 
             self.train_sampler = train_sampler
-            self._logs = {}
+            self._logs = defaultdict(list)
 
         def _get_train_sampler(self, train_dataset: Dataset = None):
             if self.train_sampler is not None:
@@ -407,13 +407,19 @@ def main(**args):
                 loss_scale = 1
 
             prefix = "" if model.training else "eval_"
+
+            n_fim, n_std = inputs["is_fim"].sum().item(), (~inputs["is_fim"]).sum().item()
+            for tag, n in [("fim", n_fim), ("std", n_std)]:
+                key, val = f"{prefix}n_{tag}", n * loss_scale
+                self._logs[key].append(val)
+
             for key, val in outputs.items():
                 if key.endswith("_loss") and val is not None:
                     key, val = f"{prefix}{key}", val.detach().item() * loss_scale
-                    if key in self._logs:
-                        self._logs[key].append(val)
-                    else:
-                        self._logs[key] = [val]
+                    for tag, n in [("fim", n_fim), ("std", n_std)]:
+                        if n > 0:
+                            key, val = f"{key}_{tag}", val * n / (n_fim + n_std)
+                            self._logs[key].append(val)
 
             return (loss, outputs) if return_outputs else loss
 
@@ -423,7 +429,7 @@ def main(**args):
                     if isinstance(val, list):
                         val = sum(val) / len(val)  # Avg.
                     logs[key] = val
-                self._logs = {}
+                self._logs.clear()
 
             super().log(logs, start_time=start_time)
 

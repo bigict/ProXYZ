@@ -13,7 +13,11 @@
 # Use '-' to read from stdin:
 #   cat seqs.txt | bash train.sh - --max_steps 1000
 
-PYTHONPATH=src python src/proxyz/train.py \
+# Setting TOKENIZERS_PARALLELISM=false forces the tokenizer to use a single thread per
+# process, clearing the deadlock risk entirely.
+TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM:-false}
+
+PYTHONPATH=src TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM} python src/proxyz/train.py \
   --tokenizer_file uniref90_30000.json \
   "$@" \
   -v

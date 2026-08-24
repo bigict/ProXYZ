@@ -4,16 +4,30 @@
 #             the file from the modular. If any change should be done, please apply the change to the
 #                          modular_xyz.py file directly. One of our CI enforces this.
 #                🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨
+import contextlib
 import random
 
 import torch
-from proxyz.utils import attr
 
 from transformers.processing_utils import ProcessorMixin
 from transformers.utils import logging
 
 
 logger = logging.get_logger(__name__)
+
+
+@contextlib.contextmanager
+def attr(obj, **kwags):
+    t = {key: getattr(obj, key) for key in kwags if hasattr(obj, key)}
+
+    for key in kwags:
+        setattr(obj, key, kwags[key])
+    yield obj
+    for key in kwags:
+        if key in t:
+            setattr(obj, key, t[key])
+        else:
+            delattr(obj, key)
 
 
 class XYZProcessor(ProcessorMixin):

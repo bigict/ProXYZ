@@ -1,3 +1,4 @@
+import contextlib
 import random
 
 import torch
@@ -41,9 +42,21 @@ from transformers.utils.generic import maybe_autocast, merge_with_config_default
 from transformers.utils.output_capturing import capture_outputs
 from transformers.utils.type_validators import interval
 
-from proxyz.utils import attr
-
 logger = logging.get_logger(__name__)
+
+
+@contextlib.contextmanager
+def attr(obj, **kwags):
+    t = {key: getattr(obj, key) for key in kwags if hasattr(obj, key)}
+
+    for key in kwags:
+        setattr(obj, key, kwags[key])
+    yield obj
+    for key in kwags:
+        if key in t:
+            setattr(obj, key, t[key])
+        else:
+            delattr(obj, key)
 
 
 @auto_docstring(checkpoint="bigict/ProXYZ")

@@ -13,9 +13,10 @@ from proxyz.data.utils import lines, opener
 def from_cluster_files(
     dataset: Dataset, file_paths: Sequence[str], generator: torch.Generator = None
 ) -> Sampler:
-    seqeuence_to_idx = {}
-    for idx, example in enumerate(dataset):
-        seqeuence_to_idx[example["id"]] = idx
+    # Incredibly fast: Extracts the column directly as a PyArrow ChunkedArray
+    seqeuence_to_idx = {
+        seq: idx for idx, seq in enumerate(dataset.data["id"].to_pylist())
+    }
 
     num_samples = 0
 
@@ -72,7 +73,6 @@ def iter_cluster_map(file_paths: Sequence[str]):
 
                         if not cursor.next_nodup():
                             break
-
 
     for file_path in file_paths:
         if file_path.endswith(".db"):

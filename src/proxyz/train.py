@@ -1,5 +1,4 @@
 import os
-from collections import defaultdict
 import functools
 import random
 
@@ -373,7 +372,7 @@ def main(**args):
             super().__init__(**kwargs)
 
             self.train_sampler = train_sampler
-            self._logs = defaultdict(list)
+            self._logs = {}
 
         def _get_train_sampler(self, train_dataset: Dataset = None):
             if self.train_sampler is not None:
@@ -392,6 +391,9 @@ def main(**args):
             )
 
             # ONLY track training metrics if the model is actively training
+            if not hasattr(self, "_last_logged"):
+                self._last_logged = self._globalstep_last_logged
+
             if (
                 self.args.average_tokens_across_devices
                 and (self.model_accepts_loss_kwargs or self.compute_loss_func)
@@ -406,20 +408,30 @@ def main(**args):
             else:
                 loss_scale = 1
 
-            prefix = "" if model.training else "eval_"
+            def logs_update(key, val):
+                val = val * loss_scale
+                if self.model.training:
+                    if key in self._logs:
+                        self._logs[key] += val
+                    else:
+                        self._logs[key] = val
+                else:
+                    key = f"eval_{key}"
+                    if key in self._logs:
+                        self._logs[key].append(val)
+                    else:
+                        self._logs[key] = [val]
 
             n_fim, n_std = inputs["is_fim"].sum().item(), (~inputs["is_fim"]).sum().item()
             for tag, n in [("fim", n_fim), ("std", n_std)]:
-                key, val = f"{prefix}n_{tag}", n * loss_scale
-                self._logs[key].append(val)
+                logs_update(f"n_{tag}", n)
 
             for key, val in outputs.items():
                 if key.endswith("_loss") and val is not None:
-                    key, val = f"{prefix}{key}", val.detach().item() * loss_scale
+                    val = val.detach().item()
                     for tag, n in [("fim", n_fim), ("std", n_std)]:
                         if n > 0:
-                            key, val = f"{key}_{tag}", val * n / (n_fim + n_std)
-                            self._logs[key].append(val)
+                            logs_update(f"{key}_{tag}", val * n / (n_fim + n_std))
 
             return (loss, outputs) if return_outputs else loss
 
@@ -428,7 +440,9 @@ def main(**args):
                 for key, val in self._logs.items():
                     if isinstance(val, list):
                         val = sum(val) / len(val)  # Avg.
-                    logs[key] = val
+                    logs[key] = val / max(self.state.global_step - self._last_logged, 1)
+
+                self._last_logged = self._globalstep_last_logged
                 self._logs.clear()
 
             super().log(logs, start_time=start_time)

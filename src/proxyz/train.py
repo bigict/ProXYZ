@@ -409,7 +409,6 @@ def main(**args):
                 loss_scale = 1
 
             def logs_update(key, val):
-                val = val * loss_scale
                 if self.model.training:
                     if key in self._logs:
                         self._logs[key] += val
@@ -424,13 +423,13 @@ def main(**args):
 
             n_fim, n_std = inputs["is_fim"].sum().item(), (~inputs["is_fim"]).sum().item()
             for tag, n in [("fim", n_fim), ("std", n_std)]:
-                logs_update(f"n_{tag}", n)
-
-            for key, val in outputs.items():
-                if key.endswith("_loss") and val is not None:
-                    val = val.detach().item()
-                    for tag, n in [("fim", n_fim), ("std", n_std)]:
-                        if n > 0:
+                logs_update(f"n_{tag}", n * loss_scale)
+                if n > 0:
+                    val = loss.detach().item()
+                    logs_update(f"loss_{tag}", val * n / (n_fim + n_std))
+                    for key, val in outputs.items():
+                        if key.endswith("_loss") and val is not None:
+                            val = val.detach().item() * loss_scale
                             logs_update(f"{key}_{tag}", val * n / (n_fim + n_std))
 
             return (loss, outputs) if return_outputs else loss

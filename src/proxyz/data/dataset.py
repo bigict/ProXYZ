@@ -1,5 +1,6 @@
 import itertools
 import pathlib
+import random
 from typing import Literal, Sequence, Union
 from urllib.parse import urlparse
 
@@ -79,7 +80,61 @@ def pdb_transform(examples: dict):
 
 @cache
 def foldcomp_dataset(file_path: str):
-    from graphein.ml.datasets.foldcomp_dataset import FoldCompDataset
+    from graphein.ml.datasets.foldcomp_dataset import FoldCompDataset as FCDatasetBase
+    from loguru import logger as log
+    from tqdm import tqdm
+
+    class FoldCompDataset(FCDatasetBase):
+        def _get_indices(self):
+            """Get indices for the dataset."""
+            # Read in look up file
+            LOOKUP_FILE = pathlib.Path(self.root) / f"{self.database}.lookup"
+            if not LOOKUP_FILE.exists():
+                self.download()
+            with open(LOOKUP_FILE, "r") as f:
+                accessions = f.readlines()
+            # Extract accessions
+            accessions = [x.strip().split("\t")[1] for x in tqdm(accessions)]
+            # Get indices
+            if self.ids is None:
+                self.ids = accessions
+            # Exclude indices
+            if self.exclude_ids is not None:
+                log.info(f"Excluding {len(self.exclude_ids)} chains...")
+                self.ids = [
+                    acc for acc in tqdm(self.ids) if acc not in self.exclude_ids
+                ]
+            # Sub sample
+            if self.fraction < 1:
+                log.info(f"Sampling fraction: {self.fraction}...")
+                self.ids = random.sample(
+                    self.ids, int(len(self.ids) * self.fraction)
+                )
+            log.info("Creating index...")
+            indices = dict(enumerate(accessions))
+            self.idx_to_protein = indices
+            self.protein_to_idx = {v: k for k, v in indices.items()}
+            log.info(f"Dataset contains {len(self.protein_to_idx)} chains.")
+
+        def process(self):
+            ids = self.ids
+
+            self.ids = None  # Trigger to load the whole db
+            super().process()
+
+            self.ids = ids
+
+        def len(self) -> int:
+            """Returns length of the dataset"""
+            return len(self.ids)
+
+        def get(self, idx):
+            """Retrieves a protein from the dataset. Can idx on either the protein
+            ID or its index."""
+            if isinstance(idx, int):
+                idx = self.ids[idx]
+            return super().get(idx)
+
 
     o = urlparse(file_path)
     if o.fragment:
@@ -116,6 +171,7 @@ def foldcomp_transform(examples: dict):
         # load from foldcomp db
         data = foldcomp_dataset(file_path)
         graph = data.get(pid)
+        assert pid == graph.id
 
         if not hasattr(graph, "coord_mask"):
             graph.coord_mask = (graph.coords != graph.fill_value)[..., 0]

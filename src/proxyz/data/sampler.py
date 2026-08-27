@@ -6,6 +6,7 @@ from typing import Sequence
 from datasets import Dataset
 import torch
 from torch.utils.data import Sampler, WeightedRandomSampler
+from tqdm import tqdm
 
 from proxyz.data.utils import lines, opener
 
@@ -74,7 +75,7 @@ def iter_cluster_map(file_paths: Sequence[str]):
                         if not cursor.next_nodup():
                             break
 
-    for file_path in file_paths:
+    for file_path in tqdm(file_paths, desc="iter_cluster_map"):
         if file_path.endswith(".db"):
             yield from cluster_map_from_db(file_path)
         else:

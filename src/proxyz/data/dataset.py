@@ -1,13 +1,14 @@
 import itertools
 import pathlib
 import random
-from typing import Literal, Sequence, Union
+from typing import Literal, Sequence
 from urllib.parse import urlparse
 
 from Bio.Data.PDBData import protein_letters_3to1
 from biotite.structure import alphabet
 from datasets import Dataset
 import torch
+from tqdm import tqdm
 
 from proxyz.data.utils import lines, opener
 from proxyz.utils import cache
@@ -50,7 +51,7 @@ def fasta_wrap(seq: str, width: int = 60) -> str:
 
 def fasta_iterator(file_paths: Sequence[str], batch_size: int = 64):
     batch = []
-    for file_path in file_paths:
+    for file_path in tqdm(file_paths, desc="fasta_iterator"):
         for description, text in fasta_parse(file_path):
             if len(batch) >= batch_size:
                 yield batch
@@ -62,7 +63,7 @@ def fasta_iterator(file_paths: Sequence[str], batch_size: int = 64):
 
 
 def pdb_iterator(file_paths: Sequence[str], batch_size: int = 64):
-    for file_path in file_paths:
+    for file_path in tqdm(file_paths, desc="pdb_iterator"):
         data = Dataset.from_csv(file_path)
         for batch in data.iter(batch_size=batch_size):
             batch["dataset"] = [file_path] * len(batch["id"])
@@ -82,7 +83,6 @@ def pdb_transform(examples: dict):
 def foldcomp_dataset(file_path: str):
     from graphein.ml.datasets.foldcomp_dataset import FoldCompDataset as FCDatasetBase
     from loguru import logger as log
-    from tqdm import tqdm
 
     class FoldCompDataset(FCDatasetBase):
         def _get_indices(self):
@@ -154,7 +154,7 @@ def foldcomp_dataset(file_path: str):
 def foldcomp_iterator(file_paths: Sequence[str], batch_size: int = 64):
     batch = []
 
-    for file_path in file_paths:
+    for file_path in tqdm(file_paths, desc="foldcomp_iterator"):
         data = foldcomp_dataset(file_path, use_cache=False)
         for pid in data.ids:
             if len(batch) >= batch_size:

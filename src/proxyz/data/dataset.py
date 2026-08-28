@@ -10,8 +10,8 @@ from datasets import Dataset
 import torch
 from tqdm import tqdm
 
-from proxyz.data.utils import lines, opener
-from proxyz.utils import cache
+from proxyz.data.utils import lines, opener, semaphore
+from proxyz.utils import cache, env
 
 
 def line_iterator(file_paths: Sequence[str], batch_size=64):
@@ -143,12 +143,15 @@ def foldcomp_dataset(file_path: str):
     else:
         ids = None
     file_path = pathlib.Path(o.path)
-    return FoldCompDataset(
-        root=file_path.parent,
-        database=file_path.name,  # name of the dataset. See: https://github.com/steineggerlab/foldcomp
-        ids=ids,
-        fraction=1,
-    )
+    with semaphore(
+        "proxyz.dataset.foldcomp.parallel", env("proxyz.dataset.foldcomp.parallel", -1)
+    ):
+        return FoldCompDataset(
+            root=file_path.parent,
+            database=file_path.name,  # name of the dataset. See: https://github.com/steineggerlab/foldcomp
+            ids=ids,
+            fraction=1,
+        )
 
 
 def foldcomp_iterator(file_paths: Sequence[str], batch_size: int = 64):

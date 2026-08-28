@@ -1,6 +1,9 @@
 import sys
 import contextlib
 import gzip
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def lines(f):
@@ -18,3 +21,19 @@ def opener(file_path: str):
     else:
         with open(file_path, "r") as f:
             yield f
+
+
+@contextlib.contextmanager
+def semaphore(name: str, value: int = 0):
+    if value < 0:  # disabled
+        yield None
+
+    try:
+        import posix_ipc
+        with posix_ipc.Semaphore(
+            f"/{name}", flags=posix_ipc.O_CREAT, initial_value=value
+        ) as sem:
+            yield sem
+    except Exception as e:
+        logger.warning(f"Create semaphore {name} failed: {e}")
+        yield None

@@ -111,9 +111,11 @@ def foldcomp_dataset(file_path: str):
                     self.ids, int(len(self.ids) * self.fraction)
                 )
             log.info("Creating index...")
-            indices = dict(enumerate(accessions))
-            self.idx_to_protein = indices
-            self.protein_to_idx = {v: k for k, v in indices.items()}
+            # indices = dict(enumerate(accessions))
+            # self.idx_to_protein = indices
+            self.idx_to_protein = accessions
+            # self.protein_to_idx = {v: k for k, v in indices.items()}
+            self.protein_to_idx = {v: k for k, v in enumerate(accessions)}
             log.info(f"Dataset contains {len(self.protein_to_idx)} chains.")
 
         def process(self):

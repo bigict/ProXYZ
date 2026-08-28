@@ -25,15 +25,14 @@ def opener(file_path: str):
 
 @contextlib.contextmanager
 def semaphore(name: str, value: int = 0):
-    if value < 0:  # disabled
-        yield None
-
-    try:
-        import posix_ipc
-        with posix_ipc.Semaphore(
-            f"/{name}", flags=posix_ipc.O_CREAT, initial_value=value
-        ) as sem:
-            yield sem
-    except Exception as e:
-        logger.warning(f"Create semaphore {name} failed: {e}")
-        yield None
+    if value >= 0:  # disabled when value < 0
+        try:
+            import posix_ipc
+            with posix_ipc.Semaphore(
+                f"/{name}", flags=posix_ipc.O_CREAT, initial_value=value
+            ) as sem:
+                yield sem
+            return
+        except Exception as e:
+            logger.warning(f"Create semaphore {name} failed: {e}")
+    yield None

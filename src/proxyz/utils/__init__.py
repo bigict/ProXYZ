@@ -1,3 +1,5 @@
+import os
+import contextlib
 import functools
 
 
@@ -17,3 +19,19 @@ def cache(func):
 class dict2object(object):
     def __init__(self, **args):
         self.__dict__.update(args)
+
+
+def env(key, defval=None, dtype=None):
+    value = os.getenv(key)
+    if value is not None:
+        if dtype == bool:
+            # json-style lower-case only.
+            if value.casefold() == "true":
+                return True
+            elif value.casefold() == "false":
+                return False
+            return int(value) != 0
+        if defval is not None and dtype is None:
+            dtype = type(defval)
+        return dtype(value) if dtype is not None else value
+    return defval

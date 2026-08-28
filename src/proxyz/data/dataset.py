@@ -1,3 +1,4 @@
+import bisect
 import itertools
 import pathlib
 import random
@@ -115,7 +116,9 @@ def foldcomp_dataset(file_path: str):
             # self.idx_to_protein = indices
             self.idx_to_protein = accessions
             # self.protein_to_idx = {v: k for k, v in indices.items()}
-            self.protein_to_idx = {v: k for k, v in enumerate(accessions)}
+            self.protein_to_idx = sorted(
+                range(len(accessions)), key=lambda idx: self.idx_to_protein[idx]
+            )
             log.info(f"Dataset contains {len(self.protein_to_idx)} chains.")
 
         def process(self):
@@ -135,6 +138,11 @@ def foldcomp_dataset(file_path: str):
             ID or its index."""
             if isinstance(idx, int):
                 idx = self.ids[idx]
+            idx = self.protein_to_idx[
+                bisect.bisect_left(
+                    self.protein_to_idx, idx, key=lambda x: self.idx_to_protein[x]
+                )
+            ]
             return super().get(idx)
 
 

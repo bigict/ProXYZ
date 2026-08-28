@@ -1,3 +1,4 @@
+from array import array
 import bisect
 import itertools
 import pathlib
@@ -116,8 +117,11 @@ def foldcomp_dataset(file_path: str):
             # self.idx_to_protein = indices
             self.idx_to_protein = accessions
             # self.protein_to_idx = {v: k for k, v in indices.items()}
-            self.protein_to_idx = sorted(
-                range(len(accessions)), key=lambda idx: self.idx_to_protein[idx]
+            self.protein_to_idx = array(
+                "I",
+                sorted(
+                    range(len(accessions)), key=lambda idx: self.idx_to_protein[idx]
+                )
             )
             log.info(f"Dataset contains {len(self.protein_to_idx)} chains.")
 

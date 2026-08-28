@@ -1,4 +1,5 @@
 from collections import defaultdict
+from collections.abc import Iterator
 import math
 import pickle
 from typing import Sequence
@@ -9,6 +10,36 @@ from torch.utils.data import Sampler, WeightedRandomSampler
 from tqdm import tqdm
 
 from proxyz.data.utils import lines, opener
+from proxyz.utils import env
+
+
+# FIX: number of categories cannot exceed 2^24
+class HierarchicalWeightedRandomSampler(WeightedRandomSampler):
+    def __iter__(self) -> Iterator[int]:
+        chunk_size = env("proxyz.data.sampler.chunk_size", 1<<23)
+        if len(self.weights) <= chunk_size:
+            yield from super().__iter__()
+        else:
+            assert self.replacement
+
+            padding_size = (chunk_size - len(self.weights) % chunk_size) % chunk_size
+            chunk_num = len(self.weights) // chunk_size + (padding_size > 0)
+
+            weights = self.weights
+            if padding_size > 0:
+                weights = torch.cat((weights, weights.new_zeros((padding_size, ))))
+            weights = weights.view(chunk_num, -1)
+            col_indices = torch.multinomial(
+                weights.sum(0), self.num_samples, self.replacement, generator=self.generator
+            )
+            row_indices = torch.multinomial(
+                weights[:, col_indices].T, 1, self.replacement, generator=self.generator
+            ).view(-1)
+
+            rand_tensor = row_indices * chunk_size + col_indices
+            assert torch.all(rand_tensor < len(self.weights))
+
+            yield from iter(rand_tensor.tolist())
 
 
 def from_cluster_files(
@@ -36,7 +67,7 @@ def from_cluster_files(
             num_samples += 1
 
     # Create WeightedRandomSampler
-    sampler = WeightedRandomSampler(
+    sampler = HierarchicalWeightedRandomSampler(
         weights=sample_weights,
         num_samples=num_samples,  # FIX: use #cluster_size instead of #samples
         replacement=True,

@@ -178,6 +178,7 @@ def foldcomp_iterator(file_paths: Sequence[str], batch_size: int = 64):
                 yield batch
                 batch = []
             batch.append({"id": pid, "dataset": file_path})
+        del data  # gc
 
     if batch:
         yield batch

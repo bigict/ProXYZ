@@ -1,3 +1,4 @@
+from array import array
 from collections import defaultdict
 from collections.abc import Iterator
 import math
@@ -25,10 +26,12 @@ class HierarchicalWeightedRandomSampler(WeightedRandomSampler):
             padding_size = (chunk_size - len(self.weights) % chunk_size) % chunk_size
             chunk_num = len(self.weights) // chunk_size + (padding_size > 0)
 
-            weights = self.weights
+            # weights = self.weights
             if padding_size > 0:
-                weights = torch.cat((weights, weights.new_zeros((padding_size, ))))
-            weights = weights.view(chunk_num, -1)
+                self.weights = torch.cat(
+                    (self.weights, self.weights.new_zeros((padding_size, )))
+                )
+            weights = self.weights.view(chunk_num, -1)
             col_indices = torch.multinomial(
                 weights.sum(0), self.num_samples, self.replacement, generator=self.generator
             )
@@ -38,8 +41,12 @@ class HierarchicalWeightedRandomSampler(WeightedRandomSampler):
 
             rand_tensor = row_indices * chunk_size + col_indices
             assert torch.all(rand_tensor < len(self.weights))
+            del row_indices, col_indices
 
-            yield from iter(rand_tensor.tolist())
+            rand_indices = array("I", rand_tensor)
+            del rand_tensor
+
+            yield from iter(rand_indices)
 
 
 def from_cluster_files(

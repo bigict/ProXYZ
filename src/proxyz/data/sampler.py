@@ -16,7 +16,7 @@ from proxyz.utils import env
 # FIX: number of categories cannot exceed 2^24
 class HierarchicalWeightedRandomSampler(WeightedRandomSampler):
     def __iter__(self) -> Iterator[int]:
-        chunk_size = env("proxyz.data.sampler.chunk_size", 1<<23)
+        chunk_size = env("proxyz_data_sampler_chunk_size", 1<<23)
         if len(self.weights) <= chunk_size:
             yield from super().__iter__()
         else:

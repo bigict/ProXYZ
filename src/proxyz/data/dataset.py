@@ -158,7 +158,7 @@ def foldcomp_dataset(file_path: str):
         ids = None
     file_path = pathlib.Path(o.path)
     with semaphore(
-        "proxyz.dataset.foldcomp.parallel", env("proxyz.dataset.foldcomp.parallel", -1)
+        "proxyz_dataset_foldcomp_parallel", env("proxyz_dataset_foldcomp_parallel", -1)
     ):
         return FoldCompDataset(
             root=file_path.parent,

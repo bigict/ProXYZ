@@ -1,5 +1,6 @@
 from array import array
 import bisect
+import contextlib
 import itertools
 import pathlib
 import random
@@ -128,8 +129,10 @@ def foldcomp_dataset(file_path: str):
         def process(self):
             ids = self.ids
 
+            self._stack = contextlib.ExitStack()
             self.ids = None  # Trigger to load the whole db
             super().process()
+            self._stack.callback(self.db.close)
 
             self.ids = ids
 
@@ -148,6 +151,10 @@ def foldcomp_dataset(file_path: str):
                 )
             ]
             return super().get(idx)
+
+        def __del__(self):
+            if hasattr(self, "_stack"):
+                self._stack.close()
 
 
     o = urlparse(file_path)

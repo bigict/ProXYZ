@@ -1,8 +1,7 @@
-from array import array
-import bisect
 import contextlib
 import itertools
 import pathlib
+import pickle
 import random
 from typing import Literal, Sequence
 from urllib.parse import urlparse
@@ -84,7 +83,9 @@ def pdb_transform(examples: dict):
 
 @cache
 def foldcomp_dataset(file_path: str):
+    import foldcomp
     from graphein.ml.datasets.foldcomp_dataset import FoldCompDataset as FCDatasetBase
+    import lmdb
     from loguru import logger as log
 
     class FoldCompDataset(FCDatasetBase):
@@ -94,13 +95,53 @@ def foldcomp_dataset(file_path: str):
             LOOKUP_FILE = pathlib.Path(self.root) / f"{self.database}.lookup"
             if not LOOKUP_FILE.exists():
                 self.download()
-            with open(LOOKUP_FILE, "r") as f:
-                accessions = f.readlines()
-            # Extract accessions
-            accessions = [x.strip().split("\t")[1] for x in tqdm(accessions)]
+
+            # Read in id_to_idx file
+            ID2IDX_FILE = pathlib.Path(self.root) / f"{self.database}.id_to_idx"
+            with semaphore("proxyz_dataset_foldcomp_database_lookup", 1) as sem:
+                class Protein2Idx:
+                    def __init__(self):
+                        if ID2IDX_FILE.exists():
+                            self.env = lmdb.open(f"{ID2IDX_FILE}", readonly=True)
+                        else:
+                            self.env = lmdb.open(f"{ID2IDX_FILE}", map_size=1<<36)
+                            with self.env.begin(write=True) as txn:
+                                with open(LOOKUP_FILE, "r") as f:
+                                    for idx, line in tqdm(
+                                        enumerate(lines(f)), desc="protein_to_idx"
+                                    ):
+                                        txn.put(
+                                            pickle.dumps(line.split("\t")[1]),
+                                            pickle.dumps(idx),
+                                        )
+
+                    def __len__(self):
+                        with self.env.begin() as txn:
+                            return txn.stat()["entries"]
+
+                    def __getitem__(self, key):
+                        with self.env.begin() as txn:
+                            return pickle.loads(txn.get(pickle.dumps(key)))
+
+                    def __contains__(self, key):
+                        with self.env.begin() as txn:
+                            return txn.get(pickle.dumps(key)) is not None
+
+                    def close(self):
+                        self.env.close()
+
+                self.protein_to_idx = Protein2Idx()
+
+            self._stack = contextlib.ExitStack()
+            self._stack.callback(self.protein_to_idx.close)
+
+            # with open(LOOKUP_FILE, "r") as f:
+            #     accessions = f.readlines()
+            # # Extract accessions
+            # accessions = [x.strip().split("\t")[1] for x in tqdm(accessions)]
             # Get indices
             if self.ids is None:
-                self.ids = accessions
+                self.ids = list(self.protein_to_idx.keys())
             # Exclude indices
             if self.exclude_ids is not None:
                 log.info(f"Excluding {len(self.exclude_ids)} chains...")
@@ -116,25 +157,19 @@ def foldcomp_dataset(file_path: str):
             log.info("Creating index...")
             # indices = dict(enumerate(accessions))
             # self.idx_to_protein = indices
-            self.idx_to_protein = accessions
             # self.protein_to_idx = {v: k for k, v in indices.items()}
-            self.protein_to_idx = array(
-                "I",
-                sorted(
-                    range(len(accessions)), key=lambda idx: self.idx_to_protein[idx]
-                )
-            )
             log.info(f"Dataset contains {len(self.protein_to_idx)} chains.")
 
         def process(self):
-            ids = self.ids
+            """Initialises the database."""
+            # Open the database
+            log.info("Opening database...")
+            self.db = foldcomp.open(
+                self.root / self.database, decompress=False
+            )  # type: ignore
 
-            self._stack = contextlib.ExitStack()
-            self.ids = None  # Trigger to load the whole db
-            super().process()
+            assert hasattr(self, "_stack")
             self._stack.callback(self.db.close)
-
-            self.ids = ids
 
         def len(self) -> int:
             """Returns length of the dataset"""
@@ -145,12 +180,10 @@ def foldcomp_dataset(file_path: str):
             ID or its index."""
             if isinstance(idx, int):
                 idx = self.ids[idx]
-            idx = self.protein_to_idx[
-                bisect.bisect_left(
-                    self.protein_to_idx, idx, key=lambda x: self.idx_to_protein[x]
-                )
-            ]
-            return super().get(idx)
+            name = idx
+            idx = self.protein_to_idx[name]
+            data = foldcomp.get_data(self.db[idx])  # type: ignore
+            return self.fc_to_pyg(data, name)
 
         def __del__(self):
             if hasattr(self, "_stack"):

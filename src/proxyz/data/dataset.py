@@ -1,11 +1,16 @@
 import contextlib
-import itertools
+import logging
 import pathlib
 import pickle
 import random
 from typing import Literal, Sequence
 from urllib.parse import urlparse
 
+try:
+    from biglist import Biglist
+    HAVE_BIGLIST = True
+except:
+    HAVE_BIGLIST = False
 from Bio.Data.PDBData import protein_letters_3to1
 from biotite.structure import alphabet
 from datasets import Dataset
@@ -14,6 +19,8 @@ from tqdm import tqdm
 
 from proxyz.data.utils import lines, opener, semaphore
 from proxyz.utils import cache, env
+
+logger = logging.getLogger(__name__)
 
 
 def line_iterator(file_paths: Sequence[str], batch_size=64):
@@ -193,7 +200,12 @@ def foldcomp_dataset(file_path: str):
     o = urlparse(file_path)
     if o.fragment:
         with opener(o.fragment) as f:
-            ids = [line for line in lines(f) if not line.startswith("#")]
+            if HAVE_BIGLIST and env("proxyz_dataset_foldcomp_biglist_enabled", True):
+                ids = Biglist.new(batch_size=4096)
+                ids.extend(line for line in lines(f) if not line.startswith("#"))
+                ids.flush()
+            else:
+                ids = [line for line in lines(f) if not line.startswith("#")]
     else:
         ids = None
     file_path = pathlib.Path(o.path)

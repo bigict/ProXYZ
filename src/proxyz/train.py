@@ -167,6 +167,12 @@ from proxyz.utils import dict2object
     "--dataloader_num_workers", type=int, default=4, help="Dataloader worker processes."
 )
 @click.option(
+    "--dataloader_prefetch_factor",
+    type=int,
+    default=None,
+    help="Number of batches loaded in advance by each worker."
+)
+@click.option(
     "--report_to",
     multiple=True,
     default=("swanlab", "tensorboard"),
@@ -476,6 +482,7 @@ def main(**args):
         num_train_epochs=args.num_train_epochs,
         max_steps=args.max_steps,
         dataloader_num_workers=args.dataloader_num_workers,
+        dataloader_prefetch_factor=args.dataloader_prefetch_factor,
         dataloader_persistent_workers=True,
         remove_unused_columns=False,
         report_to=report_to,                          # SwanLab + TensorBoard

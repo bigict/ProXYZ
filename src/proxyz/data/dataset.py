@@ -3,6 +3,7 @@ import logging
 import pathlib
 import pickle
 import random
+import tempfile
 from typing import Literal, Sequence
 from urllib.parse import urlparse
 
@@ -161,6 +162,37 @@ def foldcomp_dataset(file_path: str):
                 self.ids = random.sample(
                     self.ids, int(len(self.ids) * self.fraction)
                 )
+            if env("proxyz_dataset_foldcomp_listcache_enabled", True):
+
+                class ProteinList:
+                    def __init__(self, ids):
+                        self.path = tempfile.mkdtemp(prefix="protein_idlist-")
+                        self.env = lmdb.open(self.path, map_size=1<<36)
+                        with self.env.begin(write=True) as txn:
+                            for idx, line in tqdm(
+                                enumerate(ids), desc="protein_idlist"
+                            ):
+                                txn.put(pickle.dumps(idx), pickle.dumps(line))
+
+                    def __getitem__(self, idx):
+                        with self.env.begin() as txn:
+                            return pickle.loads(txn.get(pickle.dumps(idx)))
+
+                    def __iter__(self):
+                        with self.env.begin() as txn:
+                            for _, val in txn.cursor():
+                                yield pickle.loads(val)
+
+                    def __len__(self):
+                        with self.env.begin() as txn:
+                            return txn.stat()["entries"]
+
+                    def close(self):
+                        self.env.close()
+
+                self.ids = ProteinList(self.ids)
+                self._stack.callback(self.ids.close)
+
             log.info("Creating index...")
             # indices = dict(enumerate(accessions))
             # self.idx_to_protein = indices

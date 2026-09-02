@@ -97,6 +97,9 @@ from proxyz.utils import dict2object
     help="Attention backend. flash_attention_2 is fastest on Ampere/Ada+ GPUs.",
 )
 @click.option(
+    "--gradient_checkpointing", is_flag=True, help="Enable gradient checkpointing.",
+)
+@click.option(
     "--torch_compile",
     is_flag=True,
     help="Compiles PyTorch code to fused kernels to make it run faster.",
@@ -482,6 +485,7 @@ def main(**args):
         eval_accumulation_steps=args.gradient_accumulation_steps,
         eval_on_start=True if args.eval_files else False,
         prediction_loss_only=True,
+        gradient_checkpointing=args.gradient_checkpointing,
         bf16=use_cuda,                                # bf16 is preferred over fp16 on modern GPUs
         torch_compile=args.torch_compile,             # compiles PyTorch code
         ddp_find_unused_parameters=False,             # disabled warning

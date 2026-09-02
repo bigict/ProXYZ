@@ -97,6 +97,11 @@ from proxyz.utils import dict2object
     help="Attention backend. flash_attention_2 is fastest on Ampere/Ada+ GPUs.",
 )
 @click.option(
+    "--torch_compile",
+    is_flag=True,
+    help="Compiles PyTorch code to fused kernels to make it run faster.",
+)
+@click.option(
     "--output_dir",
     type=click.Path(),
     default="./deepseek_style_model",
@@ -478,6 +483,7 @@ def main(**args):
         eval_on_start=True if args.eval_files else False,
         prediction_loss_only=True,
         bf16=use_cuda,                                # bf16 is preferred over fp16 on modern GPUs
+        torch_compile=args.torch_compile,             # compiles PyTorch code
         ddp_find_unused_parameters=False,             # disabled warning
         num_train_epochs=args.num_train_epochs,
         max_steps=args.max_steps,

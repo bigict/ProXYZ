@@ -159,7 +159,7 @@ def _convert_esm_outputs_to_pdb(outputs) -> List[str]:
     return pdbs
 
 
-@click.command(context_settings={'show_default': True})
+@click.command(context_settings={"show_default": True})
 @click.argument("fasta_files", type=click.Path(), nargs=-1)
 @click.option(
     "--output_dir",

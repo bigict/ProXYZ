@@ -36,7 +36,7 @@ class DictObject(object):
 def main():
     pass
 
-@main.command("train", context_settings={'show_default': True})
+@main.command("train", context_settings={"show_default": True})
 @click.argument("files", type=click.Path(), nargs=-1)
 @click.option(
     "-o", "--out", type=click.Path(), default="tokens.json", help="Path to the output directory, where the files will be saved"
@@ -96,7 +96,7 @@ def train(**args):
     logger.info(encoded.ids)
     logger.info('done!')
 
-@main.command("evaluate", context_settings={'show_default': True})
+@main.command("evaluate", context_settings={"show_default": True})
 @click.argument("files", type=click.Path(), nargs=-1)
 @click.option(
     "-m", "--model", type=click.Path(), default="tokens.json", help="Path to the tokenizer.json"
@@ -135,7 +135,7 @@ def evaluate(**args):
     print(f"UNK Token Rate:  {unk_rate:.2f}%")
 
 
-@main.command("viz", context_settings={'show_default': True})
+@main.command("viz", context_settings={"show_default": True})
 @click.argument("files", type=click.Path(), nargs=-1)
 @click.option(
     "-m", "--model", type=click.Path(), default="tokens.json", help="Path to the tokenizer.json"
@@ -158,7 +158,7 @@ def viz(**args):
             print(f"Original: {line}")
             print(f"Decoded:  {decoded}")
 
-@main.command("vocab", context_settings={'show_default': True})
+@main.command("vocab", context_settings={"show_default": True})
 @click.option(
     "-m", "--model", type=click.Path(), default="tokens.json", help="Path to the tokenizer.json"
 )

@@ -8,7 +8,7 @@ from proxyz.data.utils import lines, opener
 from proxyz.utils import dict2object
 
 
-@click.command(context_settings={'show_default': True})
+@click.command(context_settings={"show_default": True})
 @click.option(
     "--output_dir", type=str, default=None, required=True, help="output dir",
 )

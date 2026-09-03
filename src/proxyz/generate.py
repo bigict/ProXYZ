@@ -17,7 +17,7 @@ from proxyz.data import dataset
 from proxyz.utils import dict2object
 
 
-@click.command(context_settings={'show_default': True})
+@click.command(context_settings={"show_default": True})
 @click.option(
     "--model_dir",
     type=click.Path(),

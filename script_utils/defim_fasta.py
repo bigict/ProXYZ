@@ -72,7 +72,7 @@ def process_fasta(input_path: str, output_path: str, strip_only: bool = False):
             f.write(f">{header}\n{dataset.fasta_wrap(clean_seq)}\n")
 
 
-@click.command(context_settings={'show_default': True})
+@click.command(context_settings={"show_default": True})
 @click.argument("input_fasta", type=click.Path(exists=True))
 @click.option(
     "-o", "--output",

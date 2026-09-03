@@ -1,30 +1,58 @@
 # ProXYZ
 
-A protein language model pre-training framework built on DeepSeek-style architectures with support for advanced training techniques.
+![GitHub License](https://img.shields.io/github/license/bigict/ProXYZ)
+[![Conventional Commits](https://img.shields.io/badge/Conventional%20Commits-1.0.0-yellow.svg)](https://conventionalcommits.org)
+![GitHub Release](https://img.shields.io/github/v/release/bigict/ProXYZ)
+
+A protein language model pre-training framework built on DeepSeek-style Llama blocks, featuring a **U-Net style dual-granularity architecture** with **structure-aware auxiliary heads** (CLE and distogram) and Fill-in-the-Middle training.
 
 ## Overview
 
-ProXYZ is designed for pre-training protein language models using modern transformer architectures. It supports both standard Llama-style models with Grouped-Query Attention (GQA) and DeepSeek-V2's Multi-head Latent Attention (MLA) for improved memory efficiency.
+ProXYZ pre-trains protein language models that jointly learn sequence and structural signals:
 
-Key features include:
-- **Flexible Architecture**: Switch between Llama GQA and DeepSeek-V2 MLA with a single flag
-- **Fill-in-the-Middle (FIM) Training**: DeepSeek-Coder style FIM training for bidirectional context understanding
-- **Cluster-based Sampling**: Weighted sampling strategy to balance cluster diversity
-- **HuggingFace Integration**: Load datasets from HuggingFace Hub or local files
-- **Checkpoint Resumption**: Resume training from previous checkpoints with full state restoration
-- **Separate Loss Tracking**: Monitor FIM and standard training losses independently
+- **U-Net style dual-granularity model (`XYZForCausalLM`)** — a character-granularity transformer stack feeds into a BPE-token-granularity transformer trunk, whose output is decoded back to character granularity with U-Net skip connections.
+- **Structure-aware auxiliary heads** — on top of the character decoder, the model predicts:
+  - **CLE** (Cα-Local-Environment, 26 structure-letter alphabet) per residue
+  - **Distogram** — pairwise residue–residue distance distributions (64 bins)
+- **Next-token prediction** — the token trunk carries the standard causal LM head.
+- **Fill-in-the-Middle (FIM) training** — DeepSeek-Coder style SPM/PSM infilling for bidirectional context.
+- **Cluster-based sampling** — weighted sampling (`n / (1 + log n)` by cluster size) to balance sequence-cluster diversity.
+- **HuggingFace integration** — train from local files (`line` / `fasta` / `pdb`) or HuggingFace Hub datasets.
+- **Separate loss tracking** — monitor standard vs. FIM loss, and each auxiliary loss, independently.
+
+## Architecture
+
+<p align="center">
+  <img src="assets/architecture.svg" alt="XYZForCausalLM architecture" width="720"/>
+</p>
+
+`XYZForCausalLM` is a three-stage U-Net over a shared `embed_tokens` and shared RoPE:
+
+1. **Char encoder** — small transformer stack at amino-acid (character) granularity.
+2. **Token trunk** — the main transformer stack at BPE-token granularity (32 layers by default). Encoder output is gathered at representative character positions (`repr_char_idx`), projected back, and added to the token embeddings.
+3. **Char decoder** — character-granularity stack receiving the trunk output via `scatter_add` plus a U-Net skip connection from the encoder.
+
+Three prediction heads sit on this backbone:
+
+| Head | Input | Output | Role |
+|------|-------|--------|------|
+| `lm_head` | trunk output (B, T, H) | next-token logits (B, T, vocab) | causal LM objective |
+| `cle_lm_head` | char decoder output (B, L, H_char) | CLE logits (B, L, 26) | per-residue local structure |
+| `distogram_head` | char decoder output (B, L, H_char) | distance logits (B, L, L, 64) | pairwise residue distances |
+
+The total loss is the next-token CE plus the auxiliary CLE / distogram CEs.
+
+> **Note on "char level":** the character path is a *deterministic* BPE tokenization (BPE dropout = 0), not per-character tokenization. The processor runs the tokenizer twice — once with BPE dropout (training regularization) and once without (for alignment between the two granularities).
 
 ## Installation
 
 ```bash
-# Clone the repository
-git clone <repository-url>
+git clone https://github.com/bigict/ProXYZ.git
 cd ProXYZ
 
-# Install dependencies
-pip install torch transformers datasets click
+pip install torch transformers datasets click biotite biopython
 
-# Optional: Install flash attention for better performance
+# Optional: flash attention for best performance
 pip install flash-attn --no-build-isolation
 ```
 
@@ -32,246 +60,195 @@ pip install flash-attn --no-build-isolation
 
 ### Training
 
-Basic training with local data:
+Basic training with local data (standard Llama backbone):
 ```bash
 bash train.sh protein_seqs.txt
 ```
 
-Training with FASTA format:
+FASTA input:
 ```bash
 bash train.sh seqs.fasta --data_format fasta
 ```
 
-Training from HuggingFace dataset:
+Train the U-Net model with all auxiliary heads:
 ```bash
-python src/proxyz/train.py \
+bash train.sh seqs.fasta --data_format fasta \
+  --model_has_cle_lm_head \
+  --model_has_distogram_lm_head \
+  --model_has_char_lm_head \
+  --model_char_hidden_size 768 \
+  --model_char_intermediate_size 2064 \
+  --model_char_num_hidden_layers 2 \
+  --model_char_num_attention_heads 6
+```
+
+Train from a HuggingFace dataset:
+```bash
+PYTHONPATH=src python src/proxyz/train.py \
   --dataset_name your-dataset/name \
   --dataset_split train \
   --text_column sequence \
-  --tokenizer_file tokenizer.json
+  --tokenizer_file uniref90_30000.json
 ```
 
-### Using MLA (Multi-head Latent Attention)
+### Structure-aware training (PDB)
 
-Switch to DeepSeek-V2 MLA for better memory efficiency:
-```bash
-bash train.sh protein_seqs.txt --use_mla
-```
+With `--data_format pdb`, CLE labels and distogram labels are derived from
+experimental structures: per-protein preprocessed tensors are loaded from
+`$DATA_PATH/processed/<id>.pt`, CLE letters are encoded from backbone /
+Cβ coordinates (biotite `i3d` alphabet), and distogram targets are
+pseudo-β (Cβ, Cα for Gly) pairwise distances binned into 64 bins over
+~2.3–21.7 Å.
 
-Customize MLA parameters:
 ```bash
-bash train.sh protein_seqs.txt \
-  --use_mla \
-  --kv_lora_rank 256 \
-  --qk_rope_head_dim 32
+DATA_PATH=/path/to/pdb_data bash train.sh pdb_list.csv \
+  --data_format pdb \
+  --model_has_cle_lm_head \
+  --model_has_distogram_lm_head
 ```
 
 ### Fill-in-the-Middle (FIM) Training
 
-Enable FIM training for bidirectional context learning:
 ```bash
 # 50% FIM, 50% standard training
 bash train.sh protein_seqs.txt --fim_rate 0.5
 
-# 100% FIM training (DeepSeek-Coder style)
-bash train.sh protein_seqs.txt --fim_rate 1.0
+# 100% FIM (DeepSeek-Coder style), SPM/PSM mixed
+bash train.sh protein_seqs.txt --fim_rate 1.0 --fim_spm_rate 0.5
 ```
+
+Formats:
+- **SPM**: `<BOS><fim_suffix><suffix><fim_prefix><prefix><fim_middle><middle><EOS>`
+- **PSM**: `<BOS><fim_prefix><prefix><fim_suffix><suffix><fim_middle><middle><EOS>`
 
 ### Cluster-based Sampling
 
-Use cluster information for balanced sampling:
 ```bash
-bash train.sh protein_seqs.txt \
-  --cluster_files clusters.txt
+bash train.sh protein_seqs.txt --cluster_files clusters.txt
 ```
 
-Cluster file format (two columns: cluster_id, data_row_id):
-```
-cluster_001 0
-cluster_001 1
-cluster_002 2
-cluster_001 3
-```
+Cluster file format (two columns: cluster_id, data_row_id). Sampling weight
+per cluster: `n / (1 + log n)` where `n` is cluster size.
 
-Sampling weight formula: `n / (1 + log(n))` where n is cluster size.
+### Validation & Resuming
 
-### Validation
-
-Enable validation during training:
 ```bash
 bash train.sh train.txt \
   --eval_files val.txt \
   --eval_strategy steps \
-  --eval_steps 500
-```
-
-### Resume from Checkpoint
-
-Continue training from a previous checkpoint:
-```bash
-bash train.sh protein_seqs.txt \
+  --eval_steps 500 \
   --resume_from_checkpoint
 ```
 
-This automatically loads the latest checkpoint from the output directory, restoring:
-- Model weights
-- Optimizer state
-- Learning rate scheduler
-- Training step counter
+`--resume_from_checkpoint` restores model weights, optimizer state, LR
+scheduler, and the training step from the latest checkpoint in `--output_dir`.
 
 ### Sequence Generation
 
-Generate protein sequences from a trained model:
 ```bash
-bash generate.sh
+bash generate.sh                                    # 10 seqs x 100 tokens
+bash generate.sh --num_sequences 50 --num_tokens 512
+bash generate.sh --prompt MVSKGE --temperature 0.8  # seeded generation
+bash generate.sh --force_length --num_tokens 256    # exact length, ignore [EOS]
 ```
 
-Generate with custom parameters:
-```bash
-bash generate.sh \
-  --num_sequences 50 \
-  --num_tokens 512 \
-  --temperature 0.8 \
-  --top_p 0.9
-```
+Generated sequences are written as a timestamped FASTA under `--output_dir`
+(default `./generated_sequences`). Tokens containing `X` (unknown residue)
+are suppressed.
 
-Conditional generation with a prefix:
-```bash
-bash generate.sh --prompt MVSKGE --num_tokens 256
-```
+### Evaluation with ESMFold
 
-FIM infilling (generate middle portion):
+Fold generated FASTA files with ESMFold to inspect structural quality:
+
 ```bash
-bash generate.sh \
-  --fim_prefix "MVSKGE" \
-  --fim_suffix "LKTIKQ" \
-  --num_tokens 100
+PYTHONPATH=src python src/proxyz/evaluate.py generated_*.fasta \
+  --output_dir ./esmfold_pdbs
 ```
 
 ## Training Options
 
-### Model Architecture
-- `--model_hidden_size`: Model width (default: 2048)
-- `--model_intermediate_size`: SwiGLU hidden dimension (default: 5632)
-- `--model_num_hidden_layers`: Model depth (default: 24)
-- `--model_num_attention_heads`: Attention heads (default: 16)
-- `--model_num_key_value_heads`: GQA KV heads (default: 4)
-- `--use_mla`: Enable DeepSeek-V2 MLA architecture
-- `--max_position_embeddings`: Context window length (default: 4096)
+### Model architecture
+- `--model_hidden_size` (2048), `--model_intermediate_size` (5632),
+  `--model_num_hidden_layers` (24), `--model_num_attention_heads` (16),
+  `--model_num_key_value_heads` (4, GQA)
+- `--model_char_hidden_size` (768), `--model_char_intermediate_size` (2064),
+  `--model_char_num_hidden_layers` (2), `--model_char_num_attention_heads` (6)
+- `--model_has_char_lm_head` / `--model_has_cle_lm_head` / `--model_has_distogram_lm_head`: enable auxiliary heads
+- `--model_use_char_position_ids`: gather token positions from char positions via `repr_char_idx`
+- `--max_position_embeddings` (4096)
 
-### MLA-specific Parameters
-- `--kv_lora_rank`: KV low-rank compression rank (default: 512)
-- `--q_lora_rank`: Q low-rank compression rank (default: 0, disabled)
-- `--qk_nope_head_dim`: Non-RoPE Q/K head dimension (default: 128)
-- `--qk_rope_head_dim`: RoPE Q/K head dimension (default: 64)
-- `--v_head_dim`: V head dimension (default: 128)
+### Data
+- `--data_format`: `line` | `fasta` | `pdb`
+- `--tokenizer_file`: BPE tokenizer JSON
+- `--tokenizer_bpe_dropout`: stochastic BPE regularization rate
+- `--max_sequence_length`: random-crop threshold for long sequences
+- `--text_column` (text), `--dataset_name` / `--dataset_config` / `--dataset_split` / `--dataset_eval_split` for HuggingFace Hub
+- `--cluster_files`: cluster-based sampling files
 
-### Training Hyperparameters
-- `--learning_rate`: Peak learning rate (default: 3e-4)
-- `--weight_decay`: Weight decay (default: 0.1)
-- `--num_train_epochs`: Training epochs (default: 3.0)
-- `--max_steps`: Fixed step count (overrides epochs if > 0)
-- `--per_device_train_batch_size`: Per-device batch size (default: 4)
-- `--gradient_accumulation_steps`: Gradient accumulation steps (default: 8)
+### FIM
+- `--fim_rate` (0.0), `--fim_spm_rate` (0.5), `--fim_sft_style` (loss only after `<fim_middle>`)
 
-### FIM Training
-- `--fim_rate`: FIM transformation probability (0.0-1.0, default: 0.0)
-- `--fim_spm_rate`: SPM format fraction among FIM examples (default: 0.5)
+### Optimization
+- `--learning_rate` (3e-4), `--weight_decay` (0.1), `--warmup_steps` (0)
+- `--num_train_epochs` (3.0), `--max_steps` (-1),
+  `--per_device_train_batch_size` (4), `--gradient_accumulation_steps` (8)
 
-### Data Loading
-- `--data_format`: Input format - "line" or "fasta" (default: "line")
-- `--dataset_name`: HuggingFace dataset name
-- `--dataset_config`: Dataset config/subset
-- `--dataset_split`: Training split (default: "train")
-- `--text_column`: Column name for sequence text (default: "text")
-- `--cluster_files`: Clustering files for weighted sampling
-
-### Validation
-- `--eval_files`: Validation data files
-- `--eval_strategy`: When to validate - "steps", "epoch", or "no" (default: "steps")
-- `--eval_steps`: Validation frequency in steps (default: 500)
-
-### Sequence Processing
-- `--max_token_length`: Random crop threshold for long sequences
-- `--tokenizer_file`: Path to tokenizer JSON file
-
-### Logging & Checkpointing
-- `--output_dir`: Checkpoint and model output directory
-- `--logging_steps`: Log every N steps (default: 10)
-- `--save_steps`: Checkpoint every N steps (default: 500)
-- `--report_to`: Logging integrations (default: "swanlab,tensorboard")
-- `--run_name`: Run name for logging
-- `--resume_from_checkpoint`: Resume from latest checkpoint
+### Logging & checkpointing
+- `--output_dir`, `--logging_steps` (10), `--save_steps` (500)
+- `--report_to` (swanlab, tensorboard), `--run_name`, `--logging_dir`
+- `--resume_from_checkpoint`
 
 ### Performance
-- `--attn_implementation`: Attention backend - "flash_attention_2", "sdpa", or "eager" (default: "flash_attention_2")
-- `--dataloader_num_workers`: DataLoader worker processes (default: 4)
+- `--attn_implementation`: `flash_attention_2` | `sdpa` | `eager`
+- `--dataloader_num_workers` (4)
 
 ## Project Structure
 
 ```
 ProXYZ/
 ├── src/proxyz/
-│   ├── train.py          # Main training script
-│   ├── generate.py       # Sequence generation
-│   ├── evaluate.py       # Model evaluation
-│   ├── utils.py          # Utility functions
-│   └── data/             # Dataset utilities
-├── train.sh              # Training wrapper script
-├── generate.sh           # Generation wrapper script
+│   ├── train.py               # Training entry point
+│   ├── generate.py            # Sequence generation
+│   ├── evaluate.py            # ESMFold evaluation of generated sequences
+│   ├── processor.py           # XYZProcessor (dual-granularity tokenization)
+│   ├── models/
+│   │   ├── configuration_xyz.py   # XYZConfig
+│   │   ├── modeling_xyz.py        # XYZForCausalLM (U-Net + heads)
+│   │   ├── modular_xyz.py         # modular source of truth
+│   │   └── processing_xyz.py      # processor implementation
+│   ├── data/                  # dataset iterators, PDB feature extraction, sampler
+│   └── utils/
+├── script_utils/              # tokenizer / id-mapping / FIM utilities
+├── assets/                    # architecture diagram (svg / html)
+├── train.sh / generate.sh     # wrapper scripts
 └── README.md
 ```
 
-## Architecture Details
-
-### Llama with GQA
-Standard transformer with Grouped-Query Attention for efficient inference. Uses:
-- SwiGLU activation
-- RMSNorm
-- RoPE positional embeddings
-- Separate input/output embeddings
-
-### DeepSeek-V2 with MLA
-Multi-head Latent Attention provides better memory efficiency through:
-- Low-rank KV compression
-- Decoupled RoPE and non-RoPE dimensions
-- Reduced KV cache size compared to MHA/GQA
-
-### FIM Training
-Fill-in-the-Middle training teaches the model to predict missing content given surrounding context:
-- **SPM format**: `<BOS><fim_suffix><suffix><fim_prefix><prefix><fim_middle><middle><EOS>`
-- **PSM format**: `<BOS><fim_prefix><prefix><fim_suffix><suffix><fim_middle><middle><EOS>`
-- Only the middle portion contributes to loss (prefix/suffix masked with -100)
-
 ## Requirements
 
-- Python 3.8+
+- Python 3.9+
 - PyTorch 2.0+
 - transformers 4.40+
-- datasets
-- click
-- flash-attn (optional, recommended for performance)
+- datasets, click
+- biotite, biopython (PDB / structure features)
+- flash-attn (optional, recommended)
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) file for details.
+MIT License — see [LICENSE](LICENSE) for details.
 
 ## Citation
-
-If you use ProXYZ in your research, please cite:
 
 ```bibtex
 @software{proxyz2026,
   title = {ProXYZ: Protein Language Model Pre-training Framework},
   author = {bigict},
   year = {2026},
-  url = {<repository-url>}
+  url = {https://github.com/bigict/ProXYZ}
 }
 ```
 
 ## Acknowledgments
 
-This project builds upon:
-- [DeepSeek-V2](https://github.com/deepseek-ai/DeepSeek-V2) for MLA architecture
 - [DeepSeek-Coder](https://github.com/deepseek-ai/DeepSeek-Coder) for FIM training methodology
 - [HuggingFace Transformers](https://github.com/huggingface/transformers) for the training framework

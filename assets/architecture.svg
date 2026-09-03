@@ -1,0 +1,242 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 -60 960 1010" width="960" height="1010" xmlns="http://www.w3.org/2000/svg" font-family="SF Mono, Menlo, Monaco, monospace">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#0969da"/>
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#1a7f37"/>
+    </marker>
+    <marker id="arrow-orange" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#9a6700"/>
+    </marker>
+    <marker id="arrow-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8250df"/>
+    </marker>
+    <marker id="arrow-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#cf222e"/>
+    </marker>
+    <linearGradient id="grad-encoder" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#dafbe1"/>
+      <stop offset="100%" stop-color="#ffffff"/>
+    </linearGradient>
+    <linearGradient id="grad-trunk" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ddf4ff"/>
+      <stop offset="50%" stop-color="#b6e3ff"/>
+      <stop offset="100%" stop-color="#ddf4ff"/>
+    </linearGradient>
+    <linearGradient id="grad-decoder" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#fbefff"/>
+      <stop offset="100%" stop-color="#ffffff"/>
+    </linearGradient>
+    <linearGradient id="grad-shared" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#ddf4ff"/>
+      <stop offset="50%" stop-color="#fff8c5"/>
+      <stop offset="100%" stop-color="#dafbe1"/>
+    </linearGradient>
+    <filter id="trunk-glow">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- white background for readability in dark mode -->
+  <rect x="0" y="-60" width="960" height="1010" fill="#ffffff"/>
+
+  <!-- title -->
+  <text x="480" y="-34" text-anchor="middle" fill="#0969da" font-size="18" font-weight="bold">XYZForCausalLM — U-Net Architecture</text>
+  <text x="480" y="-12" text-anchor="middle" fill="#656d76" font-size="12">Char Encoder → Token Trunk → Char Decoder · Shared embed_tokens &amp; RoPE</text>
+
+  <!-- ========== INPUTS ========== -->
+  <rect x="40" y="12" width="150" height="36" rx="6" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.5"/>
+  <text x="115" y="28" text-anchor="middle" fill="#1f2328" font-size="11" font-weight="bold">input_ids</text>
+  <text x="115" y="42" text-anchor="middle" fill="#656d76" font-size="9">(B, T) BPE tokens</text>
+
+  <rect x="770" y="12" width="150" height="36" rx="6" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.5"/>
+  <text x="845" y="28" text-anchor="middle" fill="#1f2328" font-size="11" font-weight="bold">char_input_ids</text>
+  <text x="845" y="42" text-anchor="middle" fill="#656d76" font-size="9">(B, L) AA chars</text>
+
+  <rect x="400" y="12" width="160" height="36" rx="6" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.5"/>
+  <text x="480" y="28" text-anchor="middle" fill="#1f2328" font-size="11" font-weight="bold">repr_char_idx</text>
+  <text x="480" y="42" text-anchor="middle" fill="#656d76" font-size="9">(B, T) token→char map</text>
+
+  <!-- ========== SHARED embed_tokens ========== -->
+  <rect x="40" y="72" width="880" height="40" rx="8" fill="url(#grad-shared)" stroke="#9a6700" stroke-width="2"/>
+  <text x="480" y="90" text-anchor="middle" fill="#9a6700" font-size="12" font-weight="bold">embed_tokens  (Shared)</text>
+  <text x="480" y="104" text-anchor="middle" fill="#656d76" font-size="9">nn.Embedding(vocab_size, hidden_size)</text>
+
+  <line x1="115" y1="48" x2="115" y2="70" stroke="#0969da" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="845" y1="48" x2="845" y2="70" stroke="#1a7f37" stroke-width="1.5" marker-end="url(#arrow-green)"/>
+
+  <!-- Output from embed_tokens -->
+  <text x="115" y="126" text-anchor="middle" fill="#0969da" font-size="9">(B, T, H)</text>
+  <line x1="115" y1="112" x2="115" y2="134" stroke="#0969da" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="845" y="126" text-anchor="middle" fill="#1a7f37" font-size="9">(B, L, H)</text>
+  <line x1="845" y1="112" x2="845" y2="134" stroke="#1a7f37" stroke-width="1.5" marker-end="url(#arrow-green)"/>
+
+  <!-- ========== to_char_encoder ========== -->
+  <rect x="770" y="138" width="150" height="30" rx="5" fill="#ffffff" stroke="#1a7f37" stroke-width="1.5"/>
+  <text x="845" y="153" text-anchor="middle" fill="#1a7f37" font-size="10">to_char_encoder</text>
+  <text x="845" y="164" text-anchor="middle" fill="#656d76" font-size="8">Linear(H→H_char)</text>
+
+  <!-- ========== SHARED RoPE ========== -->
+  <rect x="370" y="138" width="110" height="26" rx="13" fill="#f6f8fa" stroke="#656d76" stroke-width="1.5"/>
+  <text x="425" y="155" text-anchor="middle" fill="#1f2328" font-size="9" font-weight="bold">Shared RoPE</text>
+  <path d="M 425,164 L 425,178 L 845,178 L 845,192" stroke="#656d76" stroke-width="1" fill="none" stroke-dasharray="3,3"/>
+  <path d="M 425,164 L 425,178 L 260,178 L 260,340" stroke="#656d76" stroke-width="1" fill="none" stroke-dasharray="3,3"/>
+  <path d="M 425,164 L 425,178 L 700,178 L 700,560" stroke="#656d76" stroke-width="1" fill="none" stroke-dasharray="3,3"/>
+
+  <!-- ========== STAGE 1: CHAR ENCODER (compact) ========== -->
+  <rect x="750" y="192" width="190" height="80" rx="8" fill="url(#grad-encoder)" stroke="#1a7f37" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <text x="845" y="210" text-anchor="middle" fill="#1a7f37" font-size="11" font-weight="bold">Stage 1: Char Encoder</text>
+  <rect x="775" y="218" width="140" height="24" rx="4" fill="#dafbe1" stroke="#1a7f37" stroke-width="1"/>
+  <text x="845" y="234" text-anchor="middle" fill="#1f2328" font-size="10">DecoderLayers ×4</text>
+  <text x="845" y="260" text-anchor="middle" fill="#656d76" font-size="8">H_char=2048</text>
+  <line x1="845" y1="168" x2="845" y2="216" stroke="#1a7f37" stroke-width="1.5" marker-end="url(#arrow-green)"/>
+
+  <!-- encoder output -->
+  <rect x="775" y="248" width="140" height="20" rx="3" fill="#dafbe1" stroke="#1a7f37" stroke-width="1"/>
+  <text x="845" y="262" text-anchor="middle" fill="#1a7f37" font-size="9">enc_out (B,L,H_char)</text>
+
+  <!-- ========== GATHER ========== -->
+  <polygon points="480,200 530,224 480,248 430,224" fill="#fff8c5" stroke="#9a6700" stroke-width="1.5"/>
+  <text x="480" y="222" text-anchor="middle" fill="#9a6700" font-size="9">gather</text>
+  <text x="480" y="232" text-anchor="middle" fill="#656d76" font-size="7">repr_char_idx</text>
+  <path d="M 775,258 L 535,224" stroke="#1a7f37" stroke-width="1.5" fill="none" marker-end="url(#arrow-green)"/>
+  <line x1="480" y1="48" x2="480" y2="198" stroke="#9a6700" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrow-orange)"/>
+
+  <!-- ========== from_char_encoder ========== -->
+  <rect x="380" y="264" width="200" height="28" rx="5" fill="#ffffff" stroke="#9a6700" stroke-width="1.5"/>
+  <text x="480" y="278" text-anchor="middle" fill="#9a6700" font-size="10">from_char_encoder</text>
+  <text x="480" y="288" text-anchor="middle" fill="#656d76" font-size="8">Linear(H_char→H)</text>
+  <line x1="480" y1="248" x2="480" y2="262" stroke="#9a6700" stroke-width="1.5" marker-end="url(#arrow-orange)"/>
+
+  <!-- ========== + (add) ========== -->
+  <circle cx="220" cy="280" r="14" fill="#ffffff" stroke="#0969da" stroke-width="2"/>
+  <text x="220" y="285" text-anchor="middle" fill="#0969da" font-size="14" font-weight="bold">+</text>
+  <path d="M 115,134 L 115,260 Q 115,280 206,280" stroke="#0969da" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+  <line x1="380" y1="278" x2="236" y2="280" stroke="#9a6700" stroke-width="1.5" marker-end="url(#arrow-orange)"/>
+
+  <!-- ========== STAGE 2: TOKEN TRUNK (LARGE & PROMINENT) ========== -->
+  <!-- Outer glow / highlight border -->
+  <rect x="68" y="330" width="384" height="200" rx="14" fill="none" stroke="#0969da" stroke-width="3" opacity="0.3" filter="url(#trunk-glow)"/>
+  <!-- Main box -->
+  <rect x="72" y="334" width="376" height="192" rx="12" fill="url(#grad-trunk)" stroke="#0969da" stroke-width="2.5"/>
+  <text x="260" y="362" text-anchor="middle" fill="#0969da" font-size="16" font-weight="bold">Stage 2: Token Trunk</text>
+  <text x="260" y="380" text-anchor="middle" fill="#0550ae" font-size="10">— Main Backbone —</text>
+
+  <!-- Transformer layers visualization -->
+  <rect x="110" y="395" width="300" height="36" rx="6" fill="#ddf4ff" stroke="#0969da" stroke-width="1.5"/>
+  <text x="260" y="412" text-anchor="middle" fill="#1f2328" font-size="12" font-weight="bold">XYZDecoderLayer</text>
+  <text x="260" y="425" text-anchor="middle" fill="#656d76" font-size="9">Attention + MLP + RMSNorm + Residual</text>
+
+  <!-- Repeat indicator -->
+  <text x="260" y="448" text-anchor="middle" fill="#0969da" font-size="11" font-weight="bold">× 32 layers</text>
+
+  <!-- Config details -->
+  <text x="260" y="468" text-anchor="middle" fill="#656d76" font-size="9">H=4096 · FFN=11008 · 32 heads · GQA(4 KV) · SiLU · RoPE</text>
+
+  <!-- KV cache -->
+  <rect x="80" y="485" width="80" height="18" rx="3" fill="#ddf4ff" stroke="#0969da" stroke-width="0.5"/>
+  <text x="120" y="497" text-anchor="middle" fill="#0969da" font-size="8">past_kv</text>
+
+  <text x="260" y="515" text-anchor="middle" fill="#0969da" font-size="9">trunk_out (B, T, H)</text>
+
+  <line x1="220" y1="294" x2="260" y2="332" stroke="#0969da" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- ========== lm_head ========== -->
+  <rect x="40" y="570" width="160" height="40" rx="6" fill="#ffebe9" stroke="#cf222e" stroke-width="2"/>
+  <text x="120" y="588" text-anchor="middle" fill="#cf222e" font-size="12" font-weight="bold">lm_head</text>
+  <text x="120" y="602" text-anchor="middle" fill="#656d76" font-size="9">Linear(H→vocab)</text>
+  <line x1="180" y1="526" x2="120" y2="568" stroke="#cf222e" stroke-width="1.5" marker-end="url(#arrow-red)"/>
+
+  <!-- Next Token Output -->
+  <rect x="40" y="628" width="160" height="30" rx="6" fill="#ffebe9" stroke="#cf222e" stroke-width="1"/>
+  <text x="120" y="647" text-anchor="middle" fill="#cf222e" font-size="11" font-weight="bold">Next Token Logits</text>
+  <line x1="120" y1="610" x2="120" y2="626" stroke="#cf222e" stroke-width="1.5" marker-end="url(#arrow-red)"/>
+  <text x="120" y="668" text-anchor="middle" fill="#cf222e" font-size="8">(B, T, vocab)</text>
+
+  <!-- ========== to_char_decoder ========== -->
+  <rect x="350" y="560" width="170" height="28" rx="5" fill="#ffffff" stroke="#8250df" stroke-width="1.5"/>
+  <text x="435" y="574" text-anchor="middle" fill="#8250df" font-size="10">to_char_decoder</text>
+  <text x="435" y="584" text-anchor="middle" fill="#656d76" font-size="8">Linear(H→H_char)</text>
+  <line x1="310" y1="526" x2="350" y2="570" stroke="#8250df" stroke-width="1.5" marker-end="url(#arrow-purple)"/>
+
+  <!-- ========== SCATTER_ADD ========== -->
+  <polygon points="620,560 670,584 620,608 570,584" fill="#fff8c5" stroke="#9a6700" stroke-width="1.5"/>
+  <text x="620" y="582" text-anchor="middle" fill="#9a6700" font-size="9">scatter_add</text>
+  <text x="620" y="592" text-anchor="middle" fill="#656d76" font-size="7">skip conn</text>
+  <line x1="520" y1="574" x2="568" y2="584" stroke="#8250df" stroke-width="1.5" marker-end="url(#arrow-purple)"/>
+  <!-- skip from encoder -->
+  <path d="M 845,272 L 845,584 L 672,584" stroke="#1a7f37" stroke-width="1.5" fill="none" stroke-dasharray="5,3" marker-end="url(#arrow-green)"/>
+  <text x="860" y="430" fill="#1a7f37" font-size="8" transform="rotate(90,860,430)">skip connection</text>
+
+  <!-- ========== STAGE 3: CHAR DECODER (compact) ========== -->
+  <rect x="600" y="620" width="200" height="80" rx="8" fill="url(#grad-decoder)" stroke="#8250df" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <text x="700" y="640" text-anchor="middle" fill="#8250df" font-size="11" font-weight="bold">Stage 3: Char Decoder</text>
+  <rect x="625" y="648" width="150" height="24" rx="4" fill="#fbefff" stroke="#8250df" stroke-width="1"/>
+  <text x="700" y="664" text-anchor="middle" fill="#1f2328" font-size="10">DecoderLayers ×4</text>
+  <text x="700" y="690" text-anchor="middle" fill="#656d76" font-size="8">H_char=2048</text>
+  <line x1="620" y1="608" x2="700" y2="618" stroke="#9a6700" stroke-width="1.5" marker-end="url(#arrow-orange)"/>
+
+  <!-- decoder output -->
+  <rect x="625" y="678" width="150" height="18" rx="3" fill="#fbefff" stroke="#8250df" stroke-width="1"/>
+  <text x="700" y="691" text-anchor="middle" fill="#8250df" font-size="9">char_dec (B,L,H_char)</text>
+
+  <!-- KV cache for decoder -->
+  <rect x="505" y="625" width="70" height="16" rx="3" fill="#fbefff" stroke="#8250df" stroke-width="0.5"/>
+  <text x="540" y="636" text-anchor="middle" fill="#8250df" font-size="7">char_kv[1]</text>
+
+  <!-- ========== CLE HEAD ========== -->
+  <rect x="480" y="740" width="140" height="36" rx="6" fill="#fff8c5" stroke="#9a6700" stroke-width="2"/>
+  <text x="550" y="756" text-anchor="middle" fill="#9a6700" font-size="11" font-weight="bold">cle_lm_head</text>
+  <text x="550" y="770" text-anchor="middle" fill="#656d76" font-size="8">Linear(H_char→26)</text>
+  <line x1="660" y1="696" x2="590" y2="738" stroke="#9a6700" stroke-width="1.5" marker-end="url(#arrow-orange)"/>
+
+  <!-- CLE Output -->
+  <rect x="480" y="790" width="140" height="26" rx="6" fill="#fff8c5" stroke="#9a6700" stroke-width="1"/>
+  <text x="550" y="807" text-anchor="middle" fill="#9a6700" font-size="10" font-weight="bold">CLE Logits (B,L,26)</text>
+  <line x1="550" y1="776" x2="550" y2="788" stroke="#9a6700" stroke-width="1.5" marker-end="url(#arrow-orange)"/>
+
+  <!-- ========== DISTOGRAM HEAD ========== -->
+  <rect x="700" y="740" width="180" height="36" rx="6" fill="#fbefff" stroke="#8250df" stroke-width="2"/>
+  <text x="790" y="756" text-anchor="middle" fill="#8250df" font-size="11" font-weight="bold">distogram_head</text>
+  <text x="790" y="770" text-anchor="middle" fill="#656d76" font-size="8">XYZDistogram (bilinear)</text>
+  <line x1="740" y1="696" x2="760" y2="738" stroke="#8250df" stroke-width="1.5" marker-end="url(#arrow-purple)"/>
+
+  <!-- Distogram Output -->
+  <rect x="700" y="790" width="180" height="26" rx="6" fill="#fbefff" stroke="#8250df" stroke-width="1"/>
+  <text x="790" y="807" text-anchor="middle" fill="#8250df" font-size="10" font-weight="bold">Distogram Logits (B,L,L,64)</text>
+  <line x1="790" y1="776" x2="790" y2="788" stroke="#8250df" stroke-width="1.5" marker-end="url(#arrow-purple)"/>
+
+  <!-- ========== Loss labels ========== -->
+  <text x="210" y="647" fill="#cf222e" font-size="9">← LM Loss</text>
+  <text x="485" y="807" fill="#9a6700" font-size="9">← CLE Loss</text>
+  <text x="885" y="807" fill="#8250df" font-size="9">← Dist Loss</text>
+
+  <!-- ========== Shared annotations ========== -->
+  <rect x="40" y="118" width="26" height="12" rx="3" fill="#fff8c5" stroke="#9a6700" stroke-width="0.5"/>
+  <text x="53" y="127" text-anchor="middle" fill="#9a6700" font-size="6">shared</text>
+  <rect x="894" y="118" width="26" height="12" rx="3" fill="#fff8c5" stroke="#9a6700" stroke-width="0.5"/>
+  <text x="907" y="127" text-anchor="middle" fill="#9a6700" font-size="6">shared</text>
+
+  <!-- ========== Trunk emphasis label ========== -->
+  <text x="465" y="425" fill="#0550ae" font-size="10" font-style="italic">★ Primary computation</text>
+  <text x="465" y="440" fill="#0550ae" font-size="10" font-style="italic">(32 layers, ~80% params)</text>
+
+  <!-- ========== LEGEND ========== -->
+  <rect x="80" y="890" width="14" height="14" rx="3" fill="#9a6700"/>
+  <text x="100" y="901" fill="#656d76" font-size="11">Shared (embed_tokens + RoPE)</text>
+  <rect x="400" y="890" width="14" height="14" rx="3" fill="#0969da"/>
+  <text x="420" y="901" fill="#656d76" font-size="11">Token Trunk (BPE, 32 layers)</text>
+  <rect x="700" y="890" width="14" height="14" rx="3" fill="#1a7f37"/>
+  <text x="720" y="901" fill="#656d76" font-size="11">Char Encoder (AA, 4 layers)</text>
+
+  <rect x="80" y="920" width="14" height="14" rx="3" fill="#8250df"/>
+  <text x="100" y="931" fill="#656d76" font-size="11">Char Decoder (AA, 4 layers)</text>
+  <rect x="400" y="920" width="14" height="14" rx="3" fill="#cf222e"/>
+  <text x="420" y="931" fill="#656d76" font-size="11">Next Token Head</text>
+  <rect x="700" y="920" width="14" height="14" rx="3" fill="#fff8c5" stroke="#9a6700" stroke-width="0.5"/>
+  <text x="720" y="931" fill="#656d76" font-size="11">CLE / Distogram Heads</text>
+
+</svg>

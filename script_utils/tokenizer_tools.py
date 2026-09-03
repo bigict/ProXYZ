@@ -5,6 +5,7 @@ from tokenizers.models import BPE
 from tokenizers.trainers import BpeTrainer
 
 from proxyz.data.dataset import line_iterator
+from proxyz.utils import dict2object
 
 """
 SentencePiece BPE Tokenizer
@@ -27,10 +28,6 @@ Algorithm is performed in Expectation Maximization (EM) setting:
 Pecularities:
     - spaces encoded as "_", or symbol U+2581
 """
-
-class DictObject(object):
-    def __init__(self, **args):
-        self.__dict__.update(args)
 
 @click.group()
 def main():
@@ -59,7 +56,7 @@ def main():
 )
 @click.option("-v", "--verbose", is_flag=True, help="verbose output.")
 def train(**args):
-    args = DictObject(**args)
+    args = dict2object(**args)
 
     # Initialize an empty tokenizer
     tokenizer = Tokenizer(BPE(unk_token="[UNK]"))
@@ -106,7 +103,7 @@ def train(**args):
 )
 @click.option("-v", "--verbose", is_flag=True, help="verbose output.")
 def evaluate(**args):
-    args = DictObject(**args)
+    args = dict2object(**args)
 
     # Restoring model from learned vocab/merges
     tokenizer = Tokenizer.from_file(args.model)
@@ -145,7 +142,7 @@ def evaluate(**args):
 )
 @click.option("-v", "--verbose", is_flag=True, help="verbose output.")
 def viz(**args):
-    args = DictObject(**args)
+    args = dict2object(**args)
 
     # Restoring model from learned vocab/merges
     tokenizer = Tokenizer.from_file(args.model)
@@ -164,7 +161,7 @@ def viz(**args):
 )
 @click.option("-v", "--verbose", is_flag=True, help="verbose output.")
 def vocab(**args):
-    args = DictObject(**args)
+    args = dict2object(**args)
 
     # Restoring model from learned vocab/merges
     tokenizer = Tokenizer.from_file(args.model)

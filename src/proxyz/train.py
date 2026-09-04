@@ -10,7 +10,7 @@ from transformers import PreTrainedTokenizerFast, Trainer, TrainingArguments
 
 from proxyz.data import dataset, sampler
 from proxyz.models import XYZConfig, XYZForCausalLM, XYZProcessor
-from proxyz.utils import dict2object
+from proxyz.utils import data_utils, dict2object
 
 
 @click.command(context_settings={'show_default': True})
@@ -378,26 +378,6 @@ def main(**args):
     if max_sequence_length is None:
         max_sequence_length = args.max_position_embeddings
 
-    def tokenize_function(examples):
-        fim_apply = random.random() < args.fim_rate
-
-        transform = dataset.data_transform(args.data_format)
-        if transform is not None:
-            examples = transform(examples)
-
-        batch_size = len(examples[args.text_column])
-        examples = processor(
-            examples,
-            bpe_dropout=args.tokenizer_bpe_dropout,
-            char_apply=config.has_characterization,
-            fim_apply=fim_apply,
-            fim_spm_rate=args.fim_spm_rate,
-            fim_sft_style=args.fim_sft_style,
-            max_length=max_sequence_length - (5 if fim_apply else 2),
-        )
-        examples["is_fim"] = [fim_apply] * batch_size
-        return examples
-
     # Load dataset from HuggingFace or local files
     if args.dataset_name:
         # Load from HuggingFace Hub
@@ -442,7 +422,19 @@ def main(**args):
 
     # Apply tokenization
     def tokenize_dataset(dataset):
-        return dataset.with_transform(tokenize_function)
+        return dataset.with_transform(
+            functools.partial(
+                data_utils.tokenize_function,
+                processor,
+                args.data_format,
+                bpe_dropout=args.tokenizer_bpe_dropout,
+                char_apply=config.has_characterization,
+                fim_rate=args.fim_rate,
+                fim_spm_rate=args.fim_spm_rate,
+                fim_sft_style=args.fim_sft_style,
+                max_length=max_sequence_length,
+            )
+        )
 
     train_dataset = tokenize_dataset(train_dataset)
     if eval_dataset:
@@ -476,11 +468,8 @@ def main(**args):
             self, inputs: dict[str, torch.Tensor | Any]
         ) -> dict[str, torch.Tensor | Any]:
             inputs = super()._prepare_inputs(inputs)
-            if "distogram_labels" in inputs and self.processing_class is not None:
-                inputs["distogram_labels"] = self.processing_class.to_distogram(
-                    inputs["distogram_labels"][..., :-1],
-                    inputs["distogram_labels"][...,  -1],
-                )
+            if self.processing_class is not None:
+                inputs = data_utils.prepare_inputs(self.processing_class, inputs)
             return inputs
 
         def compute_loss(

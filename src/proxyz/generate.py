@@ -146,18 +146,17 @@ def main(**args):
     # ==========================================
     # By default the model may emit [EOS] early (variable-length generation).
     # With --force_length we disable [EOS] and pad to exactly num_tokens.
-    if args.num_tokens > 0:
-        gen_config = GenerationConfig(
-            do_sample=True,
-            max_new_tokens=args.num_tokens,
-            min_new_tokens=args.num_tokens if args.force_length else None,
-            temperature=args.temperature,
-            top_p=args.top_p,
-            top_k=args.top_k if args.top_k > 0 else None,
-            eos_token_id=None if args.force_length else processor.tokenizer.eos_token_id,
-            pad_token_id=processor.tokenizer.pad_token_id,
-            use_cache=args.use_cache,
-        )
+    gen_config = GenerationConfig(
+        do_sample=True,
+        max_new_tokens=args.num_tokens,
+        min_new_tokens=args.num_tokens if args.force_length else None,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        top_k=args.top_k if args.top_k > 0 else None,
+        eos_token_id=None if args.force_length else processor.tokenizer.eos_token_id,
+        pad_token_id=processor.tokenizer.pad_token_id,
+        use_cache=args.use_cache,
+    )
 
     # ==========================================
     # 4. ENCODE PROMPT & GENERATE IN BATCHES
@@ -205,33 +204,32 @@ def main(**args):
             k: v.to(device) for k, v in input_ids.items() if torch.is_tensor(v)
         }
         input_ids = data_utils.prepare_inputs(processor, input_ids)
-        if args.num_tokens > 0:
-            with torch.no_grad():
-                out = model.generate(
-                    **input_ids,
-                    processor=processor,
-                    generation_config=gen_config,
-                    logits_processor=logits_processor,
-                )
-            for row in out:
-                # Decode keeping FIM special tokens, removing only [BOS]/[EOS]/[PAD]/[UNK]
-                decoded = processor.tokenizer.decode(
-                    row.tolist(), skip_special_tokens=False
-                )
-                # Remove non-FIM special tokens
-                for special in [
-                    processor.tokenizer.bos_token,
-                    processor.tokenizer.eos_token,
-                    processor.tokenizer.pad_token,
-                    processor.tokenizer.unk_token
-                ]:
-                    if special:
-                        decoded = decoded.replace(special, "")
-                # Remove whitespace (FIM tokens like <fim_prefix> don't contain spaces)
-                seq = decoded.replace(" ", "")
-                sequences.append(seq)
-            if args.verbose:
-                print(f"  generated {len(sequences)}/{args.num_sequences}")
+        with torch.no_grad():
+            out = model.generate(
+                **input_ids,
+                processor=processor,
+                generation_config=gen_config,
+                logits_processor=logits_processor,
+            )
+        for row in out:
+            # Decode keeping FIM special tokens, removing only [BOS]/[EOS]/[PAD]/[UNK]
+            decoded = processor.tokenizer.decode(
+                row.tolist(), skip_special_tokens=False
+            )
+            # Remove non-FIM special tokens
+            for special in [
+                processor.tokenizer.bos_token,
+                processor.tokenizer.eos_token,
+                processor.tokenizer.pad_token,
+                processor.tokenizer.unk_token
+            ]:
+                if special:
+                    decoded = decoded.replace(special, "")
+            # Remove whitespace (FIM tokens like <fim_prefix> don't contain spaces)
+            seq = decoded.replace(" ", "")
+            sequences.append(seq)
+        if args.verbose:
+            print(f"  generated {len(sequences)}/{args.num_sequences}")
 
     # ==========================================
     # 5. WRITE FASTA OUTPUT

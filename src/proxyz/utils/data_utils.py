@@ -21,11 +21,13 @@ def tokenize_function(
         examples = transform(examples)
 
     batch_size = len(examples[processor.text_column])
-    examples = processor(examples, **kwargs)
+    tokenized = processor(examples, **kwargs)
     if "fim_apply" in kwargs:
-        examples["is_fim"] = [kwargs["fim_apply"]] * batch_size
+        tokenized["is_fim"] = [kwargs["fim_apply"]] * batch_size
+    if "id" in examples:
+        tokenized["id"] = examples["id"]
 
-    return examples
+    return tokenized
 
 
 def prepare_inputs(

@@ -1371,13 +1371,25 @@ class XYZProcessor(ProcessorMixin):
                             )
         return examples
 
-    def to_distogram(self, pseudo_beta, pseudo_beta_mask):
+    def to_distogram(
+        self, pseudo_beta: torch.Tensor, pseudo_beta_mask: torch.Tensor
+    ) -> torch.Tensor:
         distogram_labels = torch.cdist(pseudo_beta, pseudo_beta)
         distogram_bins = self.distogram_bins.to(pseudo_beta.device)
         distogram_labels = (distogram_labels[..., None] > distogram_bins).sum(-1)
         return distogram_labels.where(
             pseudo_beta_mask[..., :, None] * pseudo_beta_mask[..., None, :] > 0,
             self.ignore_index
+        )
+
+    def to_contact(
+        self, distogram_labels: torch.Tensor, cutoff: float = 8.0
+    ) -> torch.Tensor:
+        distogram_threshold = (
+            self.distogram_bins.to(distogram_labels.device) <= cutoff
+        ).sum(-1)
+        return (distogram_labels <= distogram_threshold).where(
+            distogram_labels != self.ignore_index, self.ignore_index
         )
 
 

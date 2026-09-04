@@ -156,7 +156,7 @@ def main(**args):
 
     def data_generator():
         for idx in range(args.num_sequences):
-            yield {"id": idx, processor.text_column: args.prompt}
+            yield {processor.text_column: args.prompt}
 
     # Apply tokenization
     def tokenize_dataset(prompt_dataset):
@@ -179,7 +179,7 @@ def main(**args):
 
     # Normal generation mode
     sequences = []
-    for input_ids in tqdm(prompt_dataloader):
+    for input_ids in tqdm(prompt_dataloader, desc="generation"):
         input_ids = {
             k: v.to(device) for k, v in input_ids.items() if torch.is_tensor(v)
         }

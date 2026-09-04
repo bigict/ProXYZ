@@ -1,10 +1,13 @@
 import os
 from datetime import datetime
+import functools
 import glob
 import re
 
 import click
+from datasets import Dataset
 import torch
+from torch.utils.data import DataLoader
 from transformers import (
     AutoModelForCausalLM,
     AutoProcessor,
@@ -12,9 +15,10 @@ from transformers import (
     LogitsProcessorList,
     SuppressTokensLogitsProcessor,
 )
+from tqdm import tqdm
 
 from proxyz.data import dataset
-from proxyz.utils import dict2object
+from proxyz.utils import data_utils, dict2object
 
 
 @click.command(context_settings={"show_default": True})
@@ -142,17 +146,18 @@ def main(**args):
     # ==========================================
     # By default the model may emit [EOS] early (variable-length generation).
     # With --force_length we disable [EOS] and pad to exactly num_tokens.
-    gen_config = GenerationConfig(
-        do_sample=True,
-        max_new_tokens=args.num_tokens,
-        min_new_tokens=args.num_tokens if args.force_length else None,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        top_k=args.top_k if args.top_k > 0 else None,
-        eos_token_id=None if args.force_length else processor.tokenizer.eos_token_id,
-        pad_token_id=processor.tokenizer.pad_token_id,
-        use_cache=args.use_cache,
-    )
+    if args.num_tokens > 0:
+        gen_config = GenerationConfig(
+            do_sample=True,
+            max_new_tokens=args.num_tokens,
+            min_new_tokens=args.num_tokens if args.force_length else None,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            top_k=args.top_k if args.top_k > 0 else None,
+            eos_token_id=None if args.force_length else processor.tokenizer.eos_token_id,
+            pad_token_id=processor.tokenizer.pad_token_id,
+            use_cache=args.use_cache,
+        )
 
     # ==========================================
     # 4. ENCODE PROMPT & GENERATE IN BATCHES
@@ -170,39 +175,63 @@ def main(**args):
         if args.verbose:
             print(f"Suppressed {len(suppress_ids)} tokens containing 'X'")
 
-    # Normal generation mode
-    prompt_ids = processor({processor.text_column: [args.prompt]}, generate=True)
+    def data_generator():
+        for idx in range(args.num_sequences):
+            yield {"id": idx, processor.text_column: args.prompt}
 
-    sequences = []
-    remaining = args.num_sequences
-    while remaining > 0:
-        n = min(args.batch_size, remaining)
-        input_ids = {k: v.repeat(n, *[1]*(v.dim() - 1)).to(device) for k, v in prompt_ids.items()}
-        with torch.no_grad():
-            out = model.generate(
-                **input_ids,
-                processor=processor,
-                generation_config=gen_config,
-                logits_processor=logits_processor,
+    # Apply tokenization
+    def tokenize_dataset(prompt_dataset):
+        return prompt_dataset.with_transform(
+            functools.partial(
+                data_utils.tokenize_function,
+                processor,
+                "line",
+                char_apply=model.config.has_characterization,
+                generate=True,
             )
-        for row in out:
-            # Decode keeping FIM special tokens, removing only [BOS]/[EOS]/[PAD]/[UNK]
-            decoded = processor.tokenizer.decode(row.tolist(), skip_special_tokens=False)
-            # Remove non-FIM special tokens
-            for special in [
-                processor.tokenizer.bos_token,
-                processor.tokenizer.eos_token,
-                processor.tokenizer.pad_token,
-                processor.tokenizer.unk_token
-            ]:
-                if special:
-                    decoded = decoded.replace(special, "")
-            # Remove whitespace (FIM tokens like <fim_prefix> don't contain spaces)
-            seq = decoded.replace(" ", "")
-            sequences.append(seq)
-        remaining -= n
-        if args.verbose:
-            print(f"  generated {len(sequences)}/{args.num_sequences}")
+        )
+
+    prompt_dataset = Dataset.from_generator(data_generator)
+    prompt_dataset = tokenize_dataset(prompt_dataset)
+
+    prompt_dataloader = DataLoader(
+        prompt_dataset, batch_size=args.batch_size, shuffle=False, pin_memory=True
+    )
+
+    # Normal generation mode
+    sequences = []
+    for input_ids in tqdm(prompt_dataloader):
+        input_ids = {
+            k: v.to(device) for k, v in input_ids.items() if torch.is_tensor(v)
+        }
+        input_ids = data_utils.prepare_inputs(processor, input_ids)
+        if args.num_tokens > 0:
+            with torch.no_grad():
+                out = model.generate(
+                    **input_ids,
+                    processor=processor,
+                    generation_config=gen_config,
+                    logits_processor=logits_processor,
+                )
+            for row in out:
+                # Decode keeping FIM special tokens, removing only [BOS]/[EOS]/[PAD]/[UNK]
+                decoded = processor.tokenizer.decode(
+                    row.tolist(), skip_special_tokens=False
+                )
+                # Remove non-FIM special tokens
+                for special in [
+                    processor.tokenizer.bos_token,
+                    processor.tokenizer.eos_token,
+                    processor.tokenizer.pad_token,
+                    processor.tokenizer.unk_token
+                ]:
+                    if special:
+                        decoded = decoded.replace(special, "")
+                # Remove whitespace (FIM tokens like <fim_prefix> don't contain spaces)
+                seq = decoded.replace(" ", "")
+                sequences.append(seq)
+            if args.verbose:
+                print(f"  generated {len(sequences)}/{args.num_sequences}")
 
     # ==========================================
     # 5. WRITE FASTA OUTPUT
@@ -211,10 +240,11 @@ def main(**args):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_path = os.path.join(args.output_dir, f"generated_{timestamp}.fasta")
 
-    with open(output_path, "w") as f:
-        for i, seq in enumerate(sequences):
-            header = f">proxyz_gen_{i} length={len(seq)}"
-            f.write(f"{header}\n{dataset.fasta_wrap(seq)}\n")
+    if sequences:
+        with open(output_path, "w") as f:
+            for i, seq in enumerate(sequences):
+                header = f">proxyz_gen_{i} length={len(seq)}"
+                f.write(f"{header}\n{dataset.fasta_wrap(seq)}\n")
 
     print(f"Wrote {len(sequences)} sequences to {output_path}")
 

@@ -23,8 +23,15 @@ class HierarchicalWeightedRandomSampler(WeightedRandomSampler):
         else:
             assert self.replacement
 
-            padding_size = (chunk_size - len(self.weights) % chunk_size) % chunk_size
-            chunk_num = len(self.weights) // chunk_size + (padding_size > 0)
+            if env("proxyz_data_sampler_chunk_squared", True):
+                chunk_num = int(math.ceil(math.sqrt(len(self.weights))))
+                assert chunk_num <= chunk_size
+                chunk_size = chunk_num  # NOTE: chunk_size == chunk_num here.
+                padding_size = chunk_num**2 - len(self.weights)
+            else:
+                padding_size = (chunk_size - len(self.weights) % chunk_size) % chunk_size
+                chunk_num = len(self.weights) // chunk_size + (padding_size > 0)
+
 
             # weights = self.weights
             if padding_size > 0:

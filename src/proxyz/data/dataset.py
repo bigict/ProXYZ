@@ -257,10 +257,12 @@ def foldcomp_transform(examples: dict):
 
 
 def pyg_transform(batch: list) -> dict:
+    pid_list = []
     coord, coord_mask, residue_idx, seq = [], [], [], []
     cle, pseudo_beta, pseudo_beta_mask = [], [], []
 
     for graph in batch:
+        pid_list.append(graph.id)
         coord.append(graph.coords)
         coord_mask.append(graph.coord_mask)
         residue_idx.append(graph.residue_pdb_idx - graph.residue_pdb_idx[0])
@@ -307,6 +309,7 @@ def pyg_transform(batch: list) -> dict:
         )
 
     return {
+        "id": pid_list,
         "text": seq,
         "residue_idx": residue_idx,
         "coord": coord,

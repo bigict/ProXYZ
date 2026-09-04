@@ -1,7 +1,7 @@
 import os
-import re
-import glob
 from datetime import datetime
+import glob
+import re
 
 import click
 import torch
@@ -171,8 +171,7 @@ def main(**args):
             print(f"Suppressed {len(suppress_ids)} tokens containing 'X'")
 
     # Normal generation mode
-    seed_text = f"{processor.tokenizer.bos_token}{args.prompt}"
-    prompt_ids = processor(seed_text, generate=True)
+    prompt_ids = processor({processor.text_column: [args.prompt]}, generate=True)
 
     sequences = []
     remaining = args.num_sequences

@@ -294,7 +294,7 @@ class XYZDistogram(nn.Module):
         x = (x + x.transpose(-2, -3)) / 2
         if self.out_proj.bias is not None:
             x = x + self.out_proj.bias
-        return x
+        return x.contiguous()  # FIX: self.loss_function
 
 
 class XYZDecoderLayer(LlamaDecoderLayer):
@@ -966,14 +966,14 @@ class XYZForCausalLM(LlamaForCausalLM):
         # append offset_mapping
         if not is_first_iteration:  # not prefill stage
             tokenized = processor.to_tokenization(
-                processor.to_example(model_inputs["input_ids"]), generate=True
+                processor.to_example(model_inputs["input_ids"][:, -1:]), generate=True
             )
             tokenized["offset_mapping"] = tokenized["offset_mapping"].to(device=offset_mapping.device)
-            if kwargs.get("use_cache"):
-                tokenized["offset_mapping"] = tokenized["offset_mapping"] + offset_mapping[:, -1:, -1:]
-                offset_mapping = torch.cat((offset_mapping, tokenized["offset_mapping"]), dim=1)
-            else:
-                offset_mapping = tokenized["offset_mapping"]
+            # if kwargs.get("use_cache"):
+            tokenized["offset_mapping"] = tokenized["offset_mapping"] + offset_mapping[:, -1:, -1:]
+            offset_mapping = torch.cat((offset_mapping, tokenized["offset_mapping"]), dim=1)
+            # else:
+            #     offset_mapping = tokenized["offset_mapping"]
         # make char-level inputs
         model_inputs.update(offset_mapping=offset_mapping)
         model_inputs.update(

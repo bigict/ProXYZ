@@ -24,6 +24,8 @@ class dict2object(object):
 def env(key, defval=None, dtype=None):
     value = os.getenv(key)
     if value is not None:
+        if defval is not None and dtype is None:
+            dtype = type(defval)
         if dtype == bool:
             # json-style lower-case only.
             if value.casefold() == "true":
@@ -31,7 +33,5 @@ def env(key, defval=None, dtype=None):
             elif value.casefold() == "false":
                 return False
             return int(value) != 0
-        if defval is not None and dtype is None:
-            dtype = type(defval)
         return dtype(value) if dtype is not None else value
     return defval

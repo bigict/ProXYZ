@@ -220,6 +220,8 @@ def main(**args):
         output_path = os.path.join(args.output_dir, f"generated_{timestamp}.fasta")
 
         if sequences:
+            # Truncate the padded items to match your exact original dataset size
+            sequences = sequences[:args.num_sequences]
             with open(output_path, "w") as f:
                 for i, seq in enumerate(sequences):
                     header = f">proxyz_gen_{i} length={len(seq)}"

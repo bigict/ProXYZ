@@ -210,7 +210,7 @@ ProXYZ/
 │   ├── train.py               # Training entry point
 │   ├── generate.py            # Sequence generation
 │   ├── evaluate.py            # ESMFold evaluation of generated sequences
-│   ├── processor.py           # XYZProcessor (dual-granularity tokenization)
+│   ├── classify.py            # Token classification
 │   ├── models/
 │   │   ├── configuration_xyz.py   # XYZConfig
 │   │   ├── modeling_xyz.py        # XYZForCausalLM (U-Net + heads)
@@ -220,7 +220,7 @@ ProXYZ/
 │   └── utils/
 ├── script_utils/              # tokenizer / id-mapping / FIM utilities
 ├── assets/                    # architecture diagram (svg / html)
-├── train.sh / generate.sh     # wrapper scripts
+├── (train|generate|classify).sh   # wrapper scripts
 └── README.md
 ```
 

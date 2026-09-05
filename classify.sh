@@ -10,6 +10,10 @@
 #
 # Output: a timestamped .pt file in ./classify_sequences/
 
-PYTHONPATH=src python src/proxyz/classify.py \
+# Setting TOKENIZERS_PARALLELISM=false forces the tokenizer to use a single thread per
+# process, clearing the deadlock risk entirely.
+TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM:-false}
+
+PYTHONPATH=src TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM} python src/proxyz/classify.py \
   "$@" \
   -v

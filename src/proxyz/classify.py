@@ -2,6 +2,8 @@ import os
 from datetime import datetime
 import functools
 
+from accelerate import Accelerator
+from accelerate.utils import gather_object
 import click
 from datasets import Dataset
 import pandas as pd
@@ -60,12 +62,6 @@ from proxyz.utils import data_utils, dict2object, model_utils, structure_utils
     help="Compiles PyTorch code to fused kernels to make it run faster.",
 )
 @click.option(
-    "--device",
-    type=str,
-    default=None,
-    help="Device to run on (default: cuda if available else cpu).",
-)
-@click.option(
     "--save_features",
     is_flag=True,
     help="Run a forward pass over each sequence and save the auxiliary "
@@ -76,8 +72,9 @@ def main(**args):
     args = dict2object(**args)
 
     torch.manual_seed(args.seed)
-    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
-    use_cuda = device.startswith("cuda") and torch.cuda.is_available()
+    accelerator = Accelerator()
+    device = accelerator.device
+    use_cuda = torch.cuda.is_available()
 
     # ==========================================
     # 1. RESOLVE MODEL & LOAD TOKENIZER
@@ -100,7 +97,7 @@ def main(**args):
 
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
-        torch_dtype=dtype,
+        dtype=dtype,
         attn_implementation=attn_impl,
         trust_remote_code=True,
     )
@@ -146,6 +143,7 @@ def main(**args):
     eval_dataloader = DataLoader(
         eval_dataset, batch_size=args.batch_size, shuffle=False, pin_memory=True
     )
+    eval_dataloader = accelerator.prepare(eval_dataloader)
 
     # TODO: provided by args
     # distogram to contact
@@ -172,6 +170,7 @@ def main(**args):
         else:
             distogram_metrics = None
 
+        batched_result = []
         for idx in range(len(input_ids["id"])):
             result = {
                 "id": input_ids["id"][idx],
@@ -180,9 +179,16 @@ def main(**args):
             if distogram_metrics is not None:
                 for key, value in distogram_metrics.items():
                     result[key] = value[idx].item()
-            results.append(result)
+            batched_result.append(result)
+
+        # Gather python strings/objects across all GPUs safely. This returns a list of
+        # all strings from all GPUs combined
+        batched_result = gather_object(batched_result)
+        if accelerator.is_main_process:
+            results += batched_result
 
         if args.save_features:
+            batched_feature = []
             for idx in range(len(input_ids["id"])):
                 feat = {
                     "id": input_ids["id"][idx], "mask": input_ids["attention_mask"][idx]
@@ -191,29 +197,41 @@ def main(**args):
                     feat["cle_logits"] = outputs.cle_logits[idx].cpu()
                 if outputs.distogram_logits is not None:
                     feat["distogram_logits"] = outputs.distogram_logits[idx].cpu()
-                features.append(feat)
+                batched_feature.append(feat)
+
+            batched_feature = gather_object(batched_feature)
+            if accelerator.is_main_process:
+                features += batched_feature
 
     # ==========================================
     # 4. WRITE EMBED OUTPUT
     # ==========================================
-    os.makedirs(args.output_dir, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if accelerator.is_main_process:
+        # Truncate the padded items to match your exact original dataset size
+        total_samples = len(eval_dataset)
 
-    if features and args.save_features:
-        output_path = os.path.join(args.output_dir, f"classify_{timestamp}.pt")
+        os.makedirs(args.output_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-        with open(output_path, "wb") as f:
-            torch.save(features, f)
+        if features and args.save_features:
+            output_path = os.path.join(args.output_dir, f"classify_{timestamp}.pt")
 
-        print(f"Wrote {len(features)} features to {output_path}")
+            with open(output_path, "wb") as f:
+                torch.save(features[:total_samples], f)
 
-    output_path = os.path.join(args.output_dir, f"classify_{timestamp}.csv")
-    df = pd.DataFrame(results)
-    if args.verbose:
-        print("Classification Summary:")
-        print(df.describe())
-    df.to_csv(output_path, index=False)
-    print(f"Wrote {len(results)} results to {output_path}")
+            print(f"Wrote {len(features)} features to {output_path}")
+
+        output_path = os.path.join(args.output_dir, f"classify_{timestamp}.csv")
+        df = pd.DataFrame(results[:total_samples])
+        if args.verbose:
+            print("Classification Summary:")
+            print(df.describe())
+        df.to_csv(output_path, index=False)
+        print(f"Wrote {len(results)} results to {output_path}")
+
+    # Clean up distributed process group to avoid resource leaks
+    if torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
 
 
 def contact_precision(

@@ -2,6 +2,8 @@ import os
 from datetime import datetime
 import functools
 
+from accelerate import Accelerator
+from accelerate.utils import gather_object
 import click
 from datasets import Dataset
 import torch
@@ -67,12 +69,6 @@ from proxyz.utils import data_utils, dict2object, model_utils
     help="Attention backend used for inference.",
 )
 @click.option(
-    "--device",
-    type=str,
-    default=None,
-    help="Device to run on (default: cuda if available else cpu).",
-)
-@click.option(
     "--use_cache",
     is_flag=True,
     help="Enable model to compute and store the key/value hidden states for past tokens",
@@ -82,8 +78,9 @@ def main(**args):
     args = dict2object(**args)
 
     torch.manual_seed(args.seed)
-    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
-    use_cuda = device.startswith("cuda") and torch.cuda.is_available()
+    accelerator = Accelerator()
+    device = accelerator.device
+    use_cuda = torch.cuda.is_available()
 
     # ==========================================
     # 1. RESOLVE MODEL & LOAD TOKENIZER
@@ -106,7 +103,7 @@ def main(**args):
 
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
-        torch_dtype=dtype,
+        dtype=dtype,
         attn_implementation=attn_impl,
         trust_remote_code=True,
     )
@@ -176,6 +173,7 @@ def main(**args):
     prompt_dataloader = DataLoader(
         prompt_dataset, batch_size=args.batch_size, shuffle=False, pin_memory=True
     )
+    prompt_dataloader = accelerator.prepare(prompt_dataloader)
 
     # Normal generation mode
     sequences = []
@@ -191,6 +189,7 @@ def main(**args):
                 generation_config=gen_config,
                 logits_processor=logits_processor,
             )
+        batched_sequence = []
         for row in out:
             # Decode keeping FIM special tokens, removing only [BOS]/[EOS]/[PAD]/[UNK]
             decoded = processor.tokenizer.decode(
@@ -207,24 +206,30 @@ def main(**args):
                     decoded = decoded.replace(special, "")
             # Remove whitespace (FIM tokens like <fim_prefix> don't contain spaces)
             seq = decoded.replace(" ", "")
-            sequences.append(seq)
-        if args.verbose:
-            print(f"  generated {len(sequences)}/{args.num_sequences}")
+            batched_sequence.append(seq)
+        batched_sequence = gather_object(batched_sequence)
+        if accelerator.is_main_process:
+            sequences += batched_sequence
 
     # ==========================================
     # 5. WRITE FASTA OUTPUT
     # ==========================================
-    os.makedirs(args.output_dir, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_path = os.path.join(args.output_dir, f"generated_{timestamp}.fasta")
+    if accelerator.is_main_process:
+        os.makedirs(args.output_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = os.path.join(args.output_dir, f"generated_{timestamp}.fasta")
 
-    if sequences:
-        with open(output_path, "w") as f:
-            for i, seq in enumerate(sequences):
-                header = f">proxyz_gen_{i} length={len(seq)}"
-                f.write(f"{header}\n{dataset.fasta_wrap(seq)}\n")
+        if sequences:
+            with open(output_path, "w") as f:
+                for i, seq in enumerate(sequences):
+                    header = f">proxyz_gen_{i} length={len(seq)}"
+                    f.write(f"{header}\n{dataset.fasta_wrap(seq)}\n")
 
-    print(f"Wrote {len(sequences)} sequences to {output_path}")
+        print(f"Wrote {len(sequences)} sequences to {output_path}")
+
+    # Clean up distributed process group to avoid resource leaks
+    if torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
 
 
 if __name__ == "__main__":

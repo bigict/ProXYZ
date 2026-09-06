@@ -159,12 +159,17 @@ def main(**args):
         with torch.no_grad():
             outputs = model(**input_ids, use_cache=False)
 
+        attention_mask_key = "char_attention_mask"
+        if attention_mask_key not in input_ids:
+            attention_mask_key = "attention_mask"
+        assert attention_mask_key in input_ids
+
         if outputs.distogram_logits is not None and "distogram_labels" in input_ids:
             distogram_metrics = contact_precision(
                 outputs.distogram_logits,
                 input_ids["distogram_labels"],
                 distogram_cutoff_idx,
-                lengths=input_ids["attention_mask"].sum(-1),
+                lengths=input_ids[attention_mask_key].sum(-1),
                 ignore_index=processor.ignore_index,
             )
         else:
@@ -174,7 +179,7 @@ def main(**args):
         for idx in range(len(input_ids["id"])):
             result = {
                 "id": input_ids["id"][idx],
-                "lenght": input_ids["attention_mask"][idx].sum().item()
+                "lenght": input_ids[attention_mask_key][idx].sum().item()
             }
             if distogram_metrics is not None:
                 for key, value in distogram_metrics.items():
@@ -191,7 +196,8 @@ def main(**args):
             batched_feature = []
             for idx in range(len(input_ids["id"])):
                 feat = {
-                    "id": input_ids["id"][idx], "mask": input_ids["attention_mask"][idx]
+                    "id": input_ids["id"][idx],
+                    "mask": input_ids[attention_mask_key][idx],
                 }
                 if outputs.cle_logits is not None:
                     feat["cle_logits"] = outputs.cle_logits[idx].cpu()

@@ -12,14 +12,19 @@ def lines(f):
 
 
 @contextlib.contextmanager
-def opener(file_path: str):
+def opener(file_path: str, mode: str = "r"):
     if file_path == "-":
-        yield sys.stdin
+        if "w" in mode:
+            yield sys.stdout
+        else:
+            yield sys.stdin
     elif file_path.endswith(".gz"):
-        with gzip.open(file_path, "rt") as f:
+        if "b" not in mode:
+            mode = f"{mode}t"  # text mode by default
+        with gzip.open(file_path, mode) as f:
             yield f
     else:
-        with open(file_path, "r") as f:
+        with open(file_path, mode) as f:
             yield f
 
 

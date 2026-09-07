@@ -2,6 +2,9 @@ import numpy as np
 import torch
 
 
+contact_ranges = {"short": (6, 12), "medium": (12, 24), "long": (24, None)}
+
+
 def contact_precision(
     predictions: torch.Tensor,
     targets: torch.Tensor,

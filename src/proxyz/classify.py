@@ -49,6 +49,15 @@ from proxyz.utils import data_utils, dict2object, model_utils, structure_utils
     default="./classify_sequences",
     help="Directory where the output FASTA file is written.",
 )
+@click.option(
+    "--contact_ranges",
+    type=click.Choice(structure_utils.contact_ranges.keys()),
+    multiple=True,
+    default=structure_utils.contact_ranges.keys(),
+    help="Minimum separation distance to consider. We often want to measure contacts "
+    "at a certain range. Typical ranges are short [6, 12], medium [12, 24], and long "
+    "[24, inf)."
+)
 @click.option("--seed", type=int, default=42, help="Random seed for reproducibility.")
 @click.option(
     "--attn_implementation",
@@ -172,6 +181,22 @@ def main(**args):
                 lengths=input_ids[attention_mask_key].sum(-1),
                 ignore_index=processor.ignore_index,
             )
+            for contact_range in  args.contact_ranges:
+                minsep, maxsep = structure_utils.contact_ranges[contact_range]
+                distogram_metrics.update(
+                    {
+                        f"{key}({contact_range}]": value
+                        for key, value in contact_precision(
+                            outputs.distogram_logits,
+                            input_ids["distogram_labels"],
+                            distogram_cutoff_idx,
+                            lengths=input_ids[attention_mask_key].sum(-1),
+                            ignore_index=processor.ignore_index,
+                            minsep=minsep,
+                            maxsep=maxsep,
+                        ).items()
+                    }
+                )
         else:
             distogram_metrics = None
 
@@ -246,6 +271,8 @@ def contact_precision(
     distogram_cutoff_idx: int,
     lengths: torch.Tensor | None = None,
     ignore_index: int = -100,
+    minsep: int = 6,
+    maxsep: int | None = None,
 ) -> torch.FloatTensor:
     predictions = F.softmax(distogram_logits, dim=-1)
     predictions = predictions[..., : distogram_cutoff_idx + 1].sum(-1)
@@ -254,7 +281,9 @@ def contact_precision(
     )
     # lengths = (targets != ignore_index).any(-1).sum(-1) + 2  # [BOS] + [EOS]
 
-    return structure_utils.contact_precision(predictions, targets, lengths)
+    return structure_utils.contact_precision(
+        predictions, targets, lengths, minsep=minsep, maxsep=maxsep
+    )
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
-import numpy as np
 import torch
+from torch.nn import functional as F
 
 
 contact_ranges = {"short": (6, 12), "medium": (12, 24), "long": (24, None)}
@@ -76,7 +76,9 @@ def contact_precision(
     predictions = predictions.masked_fill(~valid_mask, float("-inf"))
 
     # Step 2) Select the top half of the prediction (should be symmetric)
-    x_ind, y_ind = np.triu_indices(seqlen, minsep)
+    x_ind, y_ind = torch.triu_indices(
+        seqlen, seqlen, offset=minsep, device=predictions.device
+    )
     predictions_upper = predictions[:, x_ind, y_ind]
     targets_upper = targets[:, x_ind, y_ind]
 

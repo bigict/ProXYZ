@@ -17,6 +17,19 @@ from proxyz.data import dataset
 from proxyz.utils import data_utils, dict2object, model_utils, structure_utils
 
 
+def dedupe_by_id(records):
+    """Drop the samples accelerator repeats to even out batches across
+    processes (ids are unique within a run, so first occurrence wins)."""
+    seen = set()
+    unique = []
+    for record in records:
+        if record["id"] in seen:
+            continue
+        seen.add(record["id"])
+        unique.append(record)
+    return unique
+
+
 @click.command(context_settings={"show_default": True})
 @click.option(
     "--model_dir",
@@ -112,6 +125,14 @@ def main(**args):
     )
     model = model.to(device).eval()
 
+    if args.save_features and not (
+        model.config.has_cle_lm_head or model.config.has_distogram_lm_head
+    ):
+        raise click.UsageError(
+            "--save_features requires a checkpoint trained with "
+            "--model_has_cle_lm_head and/or --model_has_distogram_lm_head."
+        )
+
     if args.torch_compile:
         model = torch.compile(model)
 
@@ -155,8 +176,9 @@ def main(**args):
     eval_dataloader = accelerator.prepare(eval_dataloader)
 
     # TODO: provided by args
-    # distogram to contact
-    distogram_cutoff_idx = int((processor.distogram_bins <= 8).sum(-1))
+    # distogram to contact: bin k covers (bins[k-1], bins[k]], so the last bin
+    # fully within 8 A is the last boundary <= 8, i.e. count(bins <= 8) - 1.
+    distogram_cutoff_idx = int((processor.distogram_bins <= 8).sum(-1)) - 1
 
     # Normal clasification mode
     results, features = [], []
@@ -181,7 +203,7 @@ def main(**args):
                 lengths=input_ids[attention_mask_key].sum(-1),
                 ignore_index=processor.ignore_index,
             )
-            for contact_range in  args.contact_ranges:
+            for contact_range in args.contact_ranges:
                 minsep, maxsep = structure_utils.contact_ranges[contact_range]
                 distogram_metrics.update(
                     {
@@ -204,7 +226,7 @@ def main(**args):
         for idx in range(len(input_ids["id"])):
             result = {
                 "id": input_ids["id"][idx],
-                "lenght": input_ids[attention_mask_key][idx].sum().item()
+                "length": input_ids[attention_mask_key][idx].sum().item()
             }
             if distogram_metrics is not None:
                 for key, value in distogram_metrics.items():
@@ -222,7 +244,7 @@ def main(**args):
             for idx in range(len(input_ids["id"])):
                 feat = {
                     "id": input_ids["id"][idx],
-                    "mask": input_ids[attention_mask_key][idx],
+                    "mask": input_ids[attention_mask_key][idx].cpu(),
                 }
                 if outputs.cle_logits is not None:
                     feat["cle_logits"] = outputs.cle_logits[idx].cpu()
@@ -238,8 +260,14 @@ def main(**args):
     # 4. WRITE EMBED OUTPUT
     # ==========================================
     if accelerator.is_main_process:
-        # Truncate the padded items to match your exact original dataset size
-        total_samples = len(eval_dataset)
+        # Drop the padded duplicates instead of positional truncation: they sit
+        # at the end of each process stream, i.e. mid-list after gathering.
+        results = dedupe_by_id(results)
+        features = dedupe_by_id(features)
+        if len(results) != len(eval_dataset):
+            print(
+                f"Warning: classified {len(results)} of {len(eval_dataset)} sequences"
+            )
 
         os.makedirs(args.output_dir, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -248,12 +276,12 @@ def main(**args):
             output_path = os.path.join(args.output_dir, f"classify_{timestamp}.pt")
 
             with open(output_path, "wb") as f:
-                torch.save(features[:total_samples], f)
+                torch.save(features, f)
 
             print(f"Wrote {len(features)} features to {output_path}")
 
         output_path = os.path.join(args.output_dir, f"classify_{timestamp}.csv")
-        df = pd.DataFrame(results[:total_samples])
+        df = pd.DataFrame(results)
         if args.verbose:
             print("Classification Summary:")
             print(df.describe())

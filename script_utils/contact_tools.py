@@ -120,7 +120,8 @@ def main(**args):
             valid_mask = (sep >= minsep) & (contact_labels != processor.ignore_index)
             if maxsep is not None:
                 valid_mask &= sep < maxsep
-            contact = (contact_labels & valid_mask).any(-1).sum(-1).item()
+            # upper-triangle mask counts each contacting pair exactly once
+            contact = ((contact_labels == 1) & valid_mask).sum().item()
             result[f"contact_{contact_range}"] = contact
 
         results.append(result)

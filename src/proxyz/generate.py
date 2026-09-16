@@ -178,9 +178,6 @@ def main(**args):
     # Normal generation mode
     sequences = []
     for input_ids in tqdm(prompt_dataloader, desc="generation"):
-        input_ids = {
-            k: v.to(device) for k, v in input_ids.items() if torch.is_tensor(v)
-        }
         input_ids = data_utils.prepare_inputs(processor, input_ids)
         with torch.no_grad():
             out = model.generate(

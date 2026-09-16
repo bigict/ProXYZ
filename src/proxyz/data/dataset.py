@@ -88,7 +88,7 @@ def pdb_transform(examples: dict):
         processed_dir = pathlib.Path(file_path).parent / "processed"
         graph = torch.load(processed_dir / f"{pid}.pt", weights_only=False)
         batch.append(graph)
-    return pyg_transform(batch)
+    return pyg_transform(batch, cb_idx=3)
 
 
 @cache
@@ -253,10 +253,10 @@ def foldcomp_transform(examples: dict):
                 [int(s.split(":")[2]) for s in graph.residue_id], dtype=torch.long
             )
         batch.append(graph)
-    return pyg_transform(batch)
+    return pyg_transform(batch, cb_idx=4)
 
 
-def pyg_transform(batch: list) -> dict:
+def pyg_transform(batch: list, cb_idx: int = 3) -> dict:
     pid_list = []
     coord, coord_mask, residue_idx, seq = [], [], [], []
     cle, pseudo_beta, pseudo_beta_mask = [], [], []
@@ -269,7 +269,7 @@ def pyg_transform(batch: list) -> dict:
         seq.append("".join(protein_letters_3to1.get(r, "A") for r in graph.residues))
 
         # atom indices
-        n_idx, ca_idx, c_idx, cb_idx = 0, 1, 2, 3
+        n_idx, ca_idx, c_idx = 0, 1, 2
 
         # pseudo_beta
         is_gly = (graph.residue_type == 7)

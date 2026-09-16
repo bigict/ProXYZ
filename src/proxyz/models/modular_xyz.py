@@ -1244,7 +1244,11 @@ class XYZProcessor(ProcessorMixin):
         generate: bool = False,
         **kwargs,
     ) -> dict:
-        with attr(self.tokenizer.backend_tokenizer.model, dropout=bpe_dropout):
+        backend_tokenizer = getattr(self.tokenizer, "backend_tokenizer", None)
+        with attr(
+            self.tokenizer if backend_tokenizer is None else backend_tokenizer.model,
+            dropout=bpe_dropout
+        ):
             tokenized = self.tokenizer(
                 examples[self.text_column],
                 truncation=True,

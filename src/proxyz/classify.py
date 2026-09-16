@@ -17,19 +17,6 @@ from proxyz.data import dataset
 from proxyz.utils import data_utils, dict2object, model_utils, structure_utils
 
 
-def dedupe_by_id(records):
-    """Drop the samples accelerator repeats to even out batches across
-    processes (ids are unique within a run, so first occurrence wins)."""
-    seen = set()
-    unique = []
-    for record in records:
-        if record["id"] in seen:
-            continue
-        seen.add(record["id"])
-        unique.append(record)
-    return unique
-
-
 @click.command(context_settings={"show_default": True})
 @click.option(
     "--model_dir",
@@ -183,9 +170,6 @@ def main(**args):
     # Normal clasification mode
     results, features = [], []
     for input_ids in tqdm(eval_dataloader, desc="classification"):
-        input_ids = {
-            k: v.to(device) if torch.is_tensor(v) else v for k, v in input_ids.items()
-        }
         input_ids = data_utils.prepare_inputs(processor, input_ids)
         with torch.no_grad():
             outputs = model(**input_ids, use_cache=False)
@@ -196,27 +180,28 @@ def main(**args):
         assert attention_mask_key in input_ids
 
         if outputs.distogram_logits is not None and "distogram_labels" in input_ids:
-            valid_length = (
-                input_ids["distogram_labels"] != processor.ignore_index
-            ).any(-1).sum(-1)
-            distogram_metrics = contact_precision(
-                outputs.distogram_logits,
-                input_ids["distogram_labels"],
-                distogram_cutoff_idx,
-                lengths=valid_length,
-                ignore_index=processor.ignore_index,
+            distogram_labels = input_ids["distogram_labels"]
+
+            valid_length = (distogram_labels != processor.ignore_index).any(-1).sum(-1)
+
+            contact_matrix = F.softmax(outputs.distogram_logits, dim=-1)
+            contact_matrix = contact_matrix[..., :distogram_cutoff_idx + 1].sum(-1)
+            contact_target = (distogram_labels <= distogram_cutoff_idx).where(
+                distogram_labels != processor.ignore_index, processor.ignore_index
+            )
+
+            distogram_metrics = structure_utils.contact_precision(
+                contact_matrix, contact_target, valid_length
             )
             for contact_range in args.contact_ranges:
                 minsep, maxsep = structure_utils.contact_ranges[contact_range]
                 distogram_metrics.update(
                     {
                         f"{key}({contact_range}]": value
-                        for key, value in contact_precision(
-                            outputs.distogram_logits,
-                            input_ids["distogram_labels"],
-                            distogram_cutoff_idx,
-                            lengths=valid_length,
-                            ignore_index=processor.ignore_index,
+                        for key, value in structure_utils.contact_precision(
+                            contact_matrix,
+                            contact_target,
+                            valid_length,
                             minsep=minsep,
                             maxsep=maxsep,
                         ).items()
@@ -264,6 +249,18 @@ def main(**args):
     # 4. WRITE EMBED OUTPUT
     # ==========================================
     if accelerator.is_main_process:
+        def dedupe_by_id(records):
+            """Drop the samples accelerator repeats to even out batches across
+            processes (ids are unique within a run, so first occurrence wins)."""
+            seen = set()
+            unique = []
+            for record in records:
+                if record["id"] in seen:
+                    continue
+                seen.add(record["id"])
+                unique.append(record)
+            return unique
+
         # Drop the padded duplicates instead of positional truncation: they sit
         # at the end of each process stream, i.e. mid-list after gathering.
         results = dedupe_by_id(results)
@@ -295,27 +292,6 @@ def main(**args):
     # Clean up distributed process group to avoid resource leaks
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
-
-
-def contact_precision(
-    distogram_logits: torch.FloatTensor,
-    distogram_labels: torch.LongTensor,
-    distogram_cutoff_idx: int,
-    lengths: torch.Tensor | None = None,
-    ignore_index: int = -100,
-    minsep: int = 6,
-    maxsep: int | None = None,
-) -> torch.FloatTensor:
-    predictions = F.softmax(distogram_logits, dim=-1)
-    predictions = predictions[..., :distogram_cutoff_idx + 1].sum(-1)
-    targets = (distogram_labels <= distogram_cutoff_idx).where(
-        distogram_labels != ignore_index, ignore_index
-    )
-    # lengths = (targets != ignore_index).any(-1).sum(-1) + 2  # [BOS] + [EOS]
-
-    return structure_utils.contact_precision(
-        predictions, targets, lengths, minsep=minsep, maxsep=maxsep
-    )
 
 
 if __name__ == "__main__":

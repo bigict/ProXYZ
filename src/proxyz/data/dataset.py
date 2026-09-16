@@ -265,7 +265,7 @@ def pyg_transform(batch: list) -> dict:
         pid_list.append(graph.id)
         coord.append(graph.coords)
         coord_mask.append(graph.coord_mask)
-        residue_idx.append(graph.residue_pdb_idx - graph.residue_pdb_idx[0])
+        residue_idx.append(graph.residue_pdb_idx - graph.residue_pdb_idx[0] + 1)  # 1...
         seq.append("".join(protein_letters_3to1.get(r, "A") for r in graph.residues))
 
         # atom indices

@@ -196,11 +196,14 @@ def main(**args):
         assert attention_mask_key in input_ids
 
         if outputs.distogram_logits is not None and "distogram_labels" in input_ids:
+            valid_length = (
+                input_ids["distogram_labels"] != processor.ignore_index
+            ).any(-1).sum(-1)
             distogram_metrics = contact_precision(
                 outputs.distogram_logits,
                 input_ids["distogram_labels"],
                 distogram_cutoff_idx,
-                lengths=input_ids[attention_mask_key].sum(-1),
+                lengths=valid_length,
                 ignore_index=processor.ignore_index,
             )
             for contact_range in args.contact_ranges:
@@ -212,7 +215,7 @@ def main(**args):
                             outputs.distogram_logits,
                             input_ids["distogram_labels"],
                             distogram_cutoff_idx,
-                            lengths=input_ids[attention_mask_key].sum(-1),
+                            lengths=valid_length,
                             ignore_index=processor.ignore_index,
                             minsep=minsep,
                             maxsep=maxsep,
@@ -226,9 +229,10 @@ def main(**args):
         for idx in range(len(input_ids["id"])):
             result = {
                 "id": input_ids["id"][idx],
-                "length": input_ids[attention_mask_key][idx].sum().item()
+                "length": input_ids[attention_mask_key][idx].sum().item() - 2
             }
             if distogram_metrics is not None:
+                result["valid"] = valid_length[idx].item()
                 for key, value in distogram_metrics.items():
                     result[key] = value[idx].item()
             batched_result.append(result)
@@ -303,7 +307,7 @@ def contact_precision(
     maxsep: int | None = None,
 ) -> torch.FloatTensor:
     predictions = F.softmax(distogram_logits, dim=-1)
-    predictions = predictions[..., : distogram_cutoff_idx + 1].sum(-1)
+    predictions = predictions[..., :distogram_cutoff_idx + 1].sum(-1)
     targets = (distogram_labels <= distogram_cutoff_idx).where(
         distogram_labels != ignore_index, ignore_index
     )

@@ -13,7 +13,7 @@ from proxyz.models import XYZConfig, XYZForCausalLM, XYZProcessor
 from proxyz.utils import data_utils, dict2object
 
 
-@click.command(context_settings={'show_default': True})
+@click.command(context_settings={"show_default": True})
 @click.argument("data_files", type=click.Path(), nargs=-1)
 @click.option(
     "--eval_files", type=click.Path(), multiple=True, help="Evaluate data files"

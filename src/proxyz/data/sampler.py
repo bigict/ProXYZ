@@ -23,7 +23,7 @@ class HierarchicalWeightedRandomSampler(WeightedRandomSampler):
         else:
             assert self.replacement
 
-            if env("proxyz_data_sampler_chunk_squared", True):
+            if env("proxyz_data_sampler_chunk_squared", False):  # disabled, OOM !!!
                 chunk_num = int(math.ceil(math.sqrt(len(self.weights))))
                 assert chunk_num <= chunk_size
                 chunk_size = chunk_num  # NOTE: chunk_size == chunk_num here.

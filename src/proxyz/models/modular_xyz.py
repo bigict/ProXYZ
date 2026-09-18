@@ -1255,7 +1255,7 @@ class XYZProcessor(ProcessorMixin):
                 return_tensors="pt",
                 padding=True,
                 return_offsets_mapping=True,
-                *kwargs,
+                **kwargs,
             )
         if not generate:
             tokenized["labels"] = tokenized["input_ids"].where(tokenized["attention_mask"] > 0, self.ignore_index)

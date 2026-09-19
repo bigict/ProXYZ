@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 from transformers import (AutoModelForCausalLM, AutoProcessor)
 from tqdm import tqdm
 
-from proxyz.data import dataset
+from proxyz.data import dataset, sampler
 from proxyz.utils import data_utils, dict2object, model_utils, structure_utils
 
 
@@ -27,6 +27,13 @@ from proxyz.utils import data_utils, dict2object, model_utils, structure_utils
 )
 @click.option(
     "--data_files", type=click.Path(), multiple=True, help="Data files to classify. "
+)
+@click.option(
+    "--cluster_files",
+    type=click.Path(),
+    multiple=True,
+    help="Clustering files for cluster-based sampling. Each file has two columns: "
+    "cluster_id and data_row_id. Sampling weight = n / (1 + log(n)) where n is cluster size.",
 )
 @click.option(
     "--data_format",
@@ -157,8 +164,16 @@ def main(**args):
     eval_dataset = Dataset.from_generator(data_generator)
     eval_dataset = tokenize_dataset(eval_dataset)
 
+    # Load cluster information and compute sampling weights if cluster files provided
+    eval_sampler = None
+    if args.cluster_files:
+        eval_sampler = sampler.from_cluster_files(eval_dataset, args.cluster_files)
+        if args.verbose:
+            print(f"--- Cluster-based sampling ---")
+            print(f"Clusters: {len(eval_sampler):,}")
+
     eval_dataloader = DataLoader(
-        eval_dataset, batch_size=args.batch_size, shuffle=False, pin_memory=True
+        eval_dataset, batch_size=args.batch_size, sampler=eval_sampler, pin_memory=True
     )
     eval_dataloader = accelerator.prepare(eval_dataloader)
 

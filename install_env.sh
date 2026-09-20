@@ -24,11 +24,11 @@ while true; do
   esac
 done
 
-conda create -n ${name} python=3.11 conda-forge::gxx=11.2.0
+conda create -n ${name} python=3.11 gxx=11.2.0 -c conda-forge
 
 conda run -n ${name} \
     pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128
-conda install -n ${name} nvidia::cuda-nvcc==12.8.93
+conda install -n ${name} cuda-nvcc==12.8.93 -c nvidia -c conda-forge
 conda run -n ${name} pip install psutil
 conda run -n ${name} \
     pip install flash-attn==2.8.3.post1 --no-build-isolation
@@ -37,6 +37,6 @@ conda run -n ${name} \
 conda run -n ${name} \
     pip install accelerate==1.14.0 datasets==5.0.0 tokenizers==0.23.2 transformers==5.17.0
 conda run -n ${name} \
-    pip install graphein==1.7.8 biotite==1.6.0
+    pip install graphein==1.7.8 biotite==1.6.0 foldcomp==1.0.0 lightning==2.6.5
 conda run -n ${name} \
     pip install biglist==0.9.6 lmdb==2.3.0 posix-ipc==1.3.2

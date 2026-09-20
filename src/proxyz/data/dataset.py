@@ -249,6 +249,8 @@ def foldcomp_iterator(file_paths: Sequence[str], batch_size: int = 64):
         yield batch
 
 def foldcomp_transform(examples: dict):
+    bfactor_min = env("proxyz_dataset_foldcomp_bfactor_min", .0)
+
     batch = []
     for pid, file_path in zip(examples["id"], examples["dataset"]):
         # load from foldcomp db
@@ -258,6 +260,10 @@ def foldcomp_transform(examples: dict):
 
         if not hasattr(graph, "coord_mask"):
             graph.coord_mask = (graph.coords != graph.fill_value)[..., 0]
+        if hasattr(graph, "b_factor"):
+            graph.coord_mask = (
+                graph.coord_mask & (graph.b_factor[..., None] >= bfactor_min)
+            )
         if not hasattr(graph, "residue_pdb_idx"):
             graph.residue_pdb_idx = torch.tensor(
                 [int(s.split(":")[2]) for s in graph.residue_id], dtype=torch.long

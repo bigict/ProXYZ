@@ -106,21 +106,20 @@ class XYZProcessor(ProcessorMixin):
             )
             # del tokenized["offset_mapping"]
 
+        def feat_collate(feat, is_label: bool = False):
+            if isinstance(feat, tuple):
+                return tuple(feat_collate(feat[t]) for t in range(len(feat)))
+            max_len = max(feat[k].shape[0] for k in range(len(feat)))
+            for k in range(len(feat)):
+                pad = feat[k].new_full(
+                    (max_len - feat[k].shape[0], *feat[k].shape[1:]),
+                    self.ignore_index if is_label else 0,
+                )
+                feat[k] = torch.cat((feat[k], pad))
+            return torch.stack(feat)
+
         # copy features
         if self.features is not None:
-
-            def feat_collate(feat, is_label: bool = False):
-                if isinstance(feat, tuple):
-                    return tuple(feat_collate(feat[t]) for t in range(len(feat)))
-                max_len = max(feat[k].shape[0] for k in range(len(feat)))
-                for k in range(len(feat)):
-                    pad = feat[k].new_full(
-                        (max_len - feat[k].shape[0], *feat[k].shape[1:]),
-                        self.ignore_index if is_label else 0,
-                    )
-                    feat[k] = torch.cat((feat[k], pad))
-                return torch.stack(feat)
-
             for column in self.features:
                 if column in examples:
                     tokenized[column] = feat_collate(examples[column], "labels" in column)
@@ -133,6 +132,8 @@ class XYZProcessor(ProcessorMixin):
             #         tokenized["distogram_labels"] = self.to_distogram(
             #             *tokenized["distogram_labels"]
             #         )
+        if "residue_idx" in examples:
+            tokenized["residue_idx"] = feat_collate(examples["residue_idx"])
 
         return tokenized
 
@@ -269,32 +270,32 @@ class XYZProcessor(ProcessorMixin):
                 first, second = prefix, suffix
 
             examples[self.text_column][idx] = first_tag + first + second_tag + second + self.FIM_MIDDLE + middle
-            if self.features is not None:
 
-                def feat_fim(feat, is_label: bool = False):
-                    pad = feat.new_full((1, *feat.shape[1:]), self.ignore_index if is_label else 0)
-                    if is_spm:
-                        return torch.cat(
-                            (
-                                pad,
-                                feat[cut2:, ...],
-                                pad,
-                                feat[:cut1, ...],
-                                pad,
-                                feat[cut1:cut2, ...],
-                            )
-                        )
+            def feat_fim(feat, is_label: bool = False):
+                pad = feat.new_full((1, *feat.shape[1:]), self.ignore_index if is_label else 0)
+                if is_spm:
                     return torch.cat(
                         (
                             pad,
-                            feat[:cut1, ...],
-                            pad,
                             feat[cut2:, ...],
+                            pad,
+                            feat[:cut1, ...],
                             pad,
                             feat[cut1:cut2, ...],
                         )
                     )
+                return torch.cat(
+                    (
+                        pad,
+                        feat[:cut1, ...],
+                        pad,
+                        feat[cut2:, ...],
+                        pad,
+                        feat[cut1:cut2, ...],
+                    )
+                )
 
+            if self.features is not None:
                 for column in self.features:
                     if column in examples:
                         if isinstance(examples[column], tuple):
@@ -311,11 +312,11 @@ class XYZProcessor(ProcessorMixin):
                 cut = random.randint(0, n - max_length)
                 text = text[cut : cut + max_length]
                 examples[self.text_column][idx] = text
+
+                def feat_crop(feat):
+                    return feat[cut : cut + max_length, ...]
+
                 if self.features is not None:
-
-                    def feat_crop(feat):
-                        return feat[cut : cut + max_length, ...]
-
                     for column in self.features:
                         if column in examples:
                             if isinstance(examples[column], tuple):
@@ -323,6 +324,8 @@ class XYZProcessor(ProcessorMixin):
                                     examples[column][t][idx] = feat_crop(examples[column][t][idx])
                             else:
                                 examples[column][idx] = feat_crop(examples[column][idx])
+                if "residue_idx" in examples:
+                    examples["residue_idx"][idx] = feat_crop(examples["residue_idx"][idx])
         return examples
 
     def apply_wrap(self, examples: dict, add_eos_token: bool = True) -> dict:
@@ -331,21 +334,33 @@ class XYZProcessor(ProcessorMixin):
             if add_eos_token:
                 text = f"{text}{self.tokenizer.eos_token}"
             examples[self.text_column][idx] = text
+
+            def feat_wrap(feat, bos=0, eos=None):
+                bos = feat.new_full((1, *feat.shape[1:]), bos)
+                if add_eos_token:
+                    if eos is not None:
+                        eos = feat.new_full((1, *feat.shape[1:]), eos)
+                    else:
+                        eos = bos
+                    return torch.cat((bos, feat, eos))
+                return torch.cat((bos, feat))
+
             if self.features is not None:
-
-                def feat_wrap(feat, is_label: bool = False):
-                    pad = feat.new_full((1, *feat.shape[1:]), self.ignore_index if is_label else 0)
-                    if add_eos_token:
-                        return torch.cat((pad, feat, pad))
-                    return torch.cat((pad, feat))
-
                 for column in self.features:
                     if column in examples:
                         if isinstance(examples[column], tuple):
                             for t in range(len(examples[column])):
                                 examples[column][t][idx] = feat_wrap(examples[column][t][idx])
                         else:
-                            examples[column][idx] = feat_wrap(examples[column][idx], "labels" in column)
+                            examples[column][idx] = feat_wrap(
+                                examples[column][idx],
+                                self.ignore_index if "labels" in column else 0,
+                            )
+            if "residue_idx" in examples:
+                examples["residue_idx"][idx] = feat_wrap(
+                    examples["residue_idx"][idx],
+                    eos=examples["residue_idx"][idx][-1] + 1,
+                )
         return examples
 
     def to_distogram(self, pseudo_beta: torch.Tensor, pseudo_beta_mask: torch.Tensor) -> torch.Tensor:

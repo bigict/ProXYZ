@@ -10,7 +10,7 @@ from transformers import PreTrainedTokenizerFast, Trainer, TrainingArguments
 
 from proxyz.data import dataset, sampler
 from proxyz.models import XYZConfig, XYZForCausalLM, XYZProcessor
-from proxyz.utils import data_utils, dict2object
+from proxyz.utils import data_utils, model_utils, dict2object
 
 
 @click.command(context_settings={"show_default": True})
@@ -147,6 +147,15 @@ from proxyz.utils import data_utils, dict2object
 )
 @click.option(
     "--max_position_embeddings", type=int, default=4096, help="Context window length."
+)
+@click.option(
+    "--trainable_keys",
+    type=str,
+    multiple=True,
+    default=None,
+    help="Partial fine-tuning: keep only the parameters of these modules trainable and "
+    "freeze everything else. Repeat for multiple patterns, e.g. "
+    "'--trainable_keys .distogram_head --trainable_keys model.trunk'."
 )
 @click.option(
     "--attn_implementation",
@@ -369,7 +378,21 @@ def main(**args):
             print("Use U-net style XYZForCausalLM instead of standard Llama attention.")
         print(f"Attention backend:   {args.attn_implementation}")
         print(f"Total Parameters:    {total_params:,}")
-        print(f"Trainable Parameters: {trainable_params:,}")
+        print(f"Trainable Parameters:{trainable_params:,}")
+
+    if args.trainable_keys:
+        n_total, n_trainable = model_utils.apply_trainable_keys(
+            model, args.trainable_keys
+        )
+        if args.verbose:
+            print(f"Applied trainable_keys:{args.trainable_keys}")
+            print(f"    {n_trainable}/{n_total} parameters remain trainable.")
+
+        # Reentrant checkpointing stops backward at inputs that do not require grad,
+        # so trainable modules behind a frozen embedding would never be updated.
+        if args.gradient_checkpointing:
+            model.enable_input_require_grads()
+
 
     # ==========================================
     # 3. PREPARE YOUR DATASET

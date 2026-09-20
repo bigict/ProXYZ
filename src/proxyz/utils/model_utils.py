@@ -2,6 +2,22 @@ import os
 import glob
 import re
 
+from torch import nn
+
+
+def apply_trainable_keys(
+    model: nn.Module, trainable_keys: list[str]
+) -> tuple[int, int]:
+    """Freeze/defreeze parameters based on name substrings."""
+    n_total, n_trainable = 0, 0
+    for name, param in model.named_parameters():
+        n_total += 1
+        keep = any(k in name for k in trainable_keys)
+        param.requires_grad = keep
+        if keep:
+            n_trainable += 1
+    return n_total, n_trainable
+
 
 def resolve_model_path(model_dir: str) -> str:
     """Return model_dir if it holds a model directly, else the latest checkpoint-*."""

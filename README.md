@@ -46,10 +46,29 @@ The total loss is the next-token CE plus the auxiliary CLE / distogram CEs.
 
 ## Installation
 
+### Recommended: conda environment script
+
+[`install_env.sh`](install_env.sh) builds a reproducible conda environment with pinned CUDA / PyTorch / flash-attn versions (Python 3.11, CUDA 12.8, PyTorch 2.11, flash-attn 2.8.3):
+
 ```bash
 git clone https://github.com/bigict/ProXYZ.git
 cd ProXYZ
 
+# Create the conda environment (default name: "xyz")
+bash install_env.sh
+
+# Or specify a custom environment name
+bash install_env.sh -n abc
+
+# Activate it
+conda activate xyz
+```
+
+The script installs the full stack: `torch` (cu128), `flash-attn`, `torch_geometric`, `transformers`, `datasets`, `accelerate`, `tokenizers`, `graphein`, `biotite`, `biglist`, `lmdb`, and `posix-ipc`. Run `bash install_env.sh -h` to see all options.
+
+### Manual install (pip)
+
+```bash
 pip install torch transformers datasets click biotite biopython
 
 # Optional: flash attention for best performance
@@ -220,6 +239,7 @@ ProXYZ/
 │   └── utils/
 ├── script_utils/              # tokenizer / id-mapping / FIM utilities
 ├── assets/                    # architecture diagram (svg / html)
+├── install_env.sh             # conda environment setup script
 ├── (train|generate|classify).sh   # wrapper scripts
 └── README.md
 ```

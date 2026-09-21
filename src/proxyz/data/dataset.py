@@ -272,20 +272,66 @@ def foldcomp_transform(examples: dict):
     return pyg_transform(batch, gly_idx=6)
 
 
+def pyg_dropout(
+    graph,
+    p: float = 0,
+    window_size: int = 4,
+    span_min: int = 1,
+    span_max: int = 10,
+    ca_idx: int = 1,
+):
+    assert span_min <= span_max, (
+        f"span_min={span_min} should be less than or equal span_max={span_max}"
+    )
+    if p > 0 and graph.coord_mask.size(-2) > span_max:
+        if random.random() < p and (~graph.coord_mask[:, ca_idx]).any():
+            w = (~graph.coord_mask[:, ca_idx]).unfold(-1, window_size, 1).sum(-1)
+            idx = (w + 1e-8).multinomial(num_samples=1).item()
+            span = random.randint(span_min, span_max)
+
+            # Apply crop
+            graph.coords = torch.cat((graph.coords[:idx], graph.coords[idx + span:]))
+            graph.coord_mask = torch.cat(
+                (graph.coord_mask[:idx], graph.coord_mask[idx + span:])
+            )
+            graph.residue_pdb_idx = torch.cat(
+                (graph.residue_pdb_idx[:idx], graph.residue_pdb_idx[idx + span:])
+            )
+            graph.residue_type = torch.cat(
+                (graph.residue_type[:idx], graph.residue_type[idx + span:])
+            )
+            graph.residues = graph.residues[:idx] + graph.residues[idx + span:]
+    return graph
+
+
 def pyg_transform(batch: list, gly_idx: int = 7) -> dict:
+    dropout_p = env("proxyz_dataset_pyg_dropout_p", .0)
+    window_size = env("proxyz_dataset_pyg_dropout_window_size", 4)
+    span_min = env("proxyz_dataset_pyg_dropout_span_min", 1)
+    span_max = env("proxyz_dataset_pyg_dropout_span_max", 10)
+
     pid_list = []
     coord, coord_mask, residue_idx, seq = [], [], [], []
     cle, pseudo_beta, pseudo_beta_mask = [], [], []
 
+    # NOTE: Atom indices; Consider making this explicit/configurable
+    n_idx, ca_idx, c_idx, cb_idx = 0, 1, 2, 4
+
     for graph in batch:
+        graph = pyg_dropout(
+            graph,
+            p=dropout_p,
+            window_size=window_size,
+            span_min=span_min,
+            span_max=span_max,
+            ca_idx=ca_idx,
+        )
+
         pid_list.append(graph.id)
         coord.append(graph.coords)
         coord_mask.append(graph.coord_mask)
         residue_idx.append(graph.residue_pdb_idx - graph.residue_pdb_idx[0] + 1)  # 1...
         seq.append("".join(protein_letters_3to1.get(r, "A") for r in graph.residues))
-
-        # atom indices
-        n_idx, ca_idx, c_idx, cb_idx = 0, 1, 2, 4
 
         # pseudo_beta
         is_gly = (graph.residue_type == gly_idx)

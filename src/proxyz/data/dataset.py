@@ -259,20 +259,20 @@ def foldcomp_transform(examples: dict):
         assert pid == graph.id
 
         if not hasattr(graph, "coord_mask"):
-            graph.coord_mask = (graph.coords != graph.fill_value)[..., 0]
+            graph.coord_mask = (graph.coords != graph.fill_value)[:, :, 0]
         if hasattr(graph, "b_factor"):
             graph.coord_mask = (
-                graph.coord_mask & (graph.b_factor[..., None] >= bfactor_min)
+                graph.coord_mask & (graph.b_factor[:, None] >= bfactor_min)
             )
         if not hasattr(graph, "residue_pdb_idx"):
             graph.residue_pdb_idx = torch.tensor(
                 [int(s.split(":")[2]) for s in graph.residue_id], dtype=torch.long
             )
         batch.append(graph)
-    return pyg_transform(batch)
+    return pyg_transform(batch, gly_idx=6)
 
 
-def pyg_transform(batch: list) -> dict:
+def pyg_transform(batch: list, gly_idx: int = 7) -> dict:
     pid_list = []
     coord, coord_mask, residue_idx, seq = [], [], [], []
     cle, pseudo_beta, pseudo_beta_mask = [], [], []
@@ -288,7 +288,7 @@ def pyg_transform(batch: list) -> dict:
         n_idx, ca_idx, c_idx, cb_idx = 0, 1, 2, 4
 
         # pseudo_beta
-        is_gly = (graph.residue_type == 7)
+        is_gly = (graph.residue_type == gly_idx)
         pseudo_beta.append(
             torch.where(
                 is_gly[:, None], graph.coords[:, ca_idx, :], graph.coords[:, cb_idx, :]

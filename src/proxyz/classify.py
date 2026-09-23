@@ -212,7 +212,7 @@ def main(**args):
                 minsep, maxsep = structure_utils.contact_ranges[contact_range]
                 distogram_metrics.update(
                     {
-                        f"{key}({contact_range}]": value
+                        f"{key}/{contact_range}": value
                         for key, value in structure_utils.contact_precision(
                             contact_matrix,
                             contact_target,

@@ -10,7 +10,7 @@ import pandas as pd
 import torch
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
-from transformers import (AutoModelForCausalLM, AutoProcessor)
+from transformers import AutoModelForCausalLM, AutoProcessor
 from tqdm import tqdm
 
 from proxyz.data import dataset, sampler
@@ -264,22 +264,10 @@ def main(**args):
     # 4. WRITE EMBED OUTPUT
     # ==========================================
     if accelerator.is_main_process:
-        def dedupe_by_id(records):
-            """Drop the samples accelerator repeats to even out batches across
-            processes (ids are unique within a run, so first occurrence wins)."""
-            seen = set()
-            unique = []
-            for record in records:
-                if record["id"] in seen:
-                    continue
-                seen.add(record["id"])
-                unique.append(record)
-            return unique
-
         # Drop the padded duplicates instead of positional truncation: they sit
         # at the end of each process stream, i.e. mid-list after gathering.
-        results = dedupe_by_id(results)
-        features = dedupe_by_id(features)
+        results = list(data_utils.deduplicate(results))
+        features = list(data_utils.deduplicate(features))
         if len(results) != len(eval_dataset):
             print(
                 f"Warning: classified {len(results)} of {len(eval_dataset)} sequences"

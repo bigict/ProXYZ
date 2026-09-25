@@ -1,5 +1,5 @@
 import random
-from typing import Any
+from typing import Any, Iterable
 
 import torch
 
@@ -41,3 +41,15 @@ def prepare_inputs(
     if "residue_idx" in inputs and "char_position_ids" not in inputs:
         inputs["char_position_ids"] = inputs["residue_idx"]
     return inputs
+
+
+def deduplicate(
+    records: Iterable[dict[str, Any]], key: str = "id"
+) -> Iterable[dict[str, Any]]:
+    seen = set()
+
+    for record in records:
+        if record[key] in seen:
+            continue
+        seen.add(record[key])
+        yield record

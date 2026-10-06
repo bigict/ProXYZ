@@ -280,9 +280,15 @@ from proxyz.utils import data_utils, model_utils, dict2object
 )
 @click.option(
     "--random_seed",
-    type=float,
-    default=None,
+    type=int,
+    default=42,
     help="Initializes the underlying pseudo-random number generator (PRNG).",
+)
+@click.option(
+    "--ignore_data_skip",
+    is_flag=True,
+    help="When resuming training, skip fast-forwarding through the dataset to reach "
+    "the previous state.",
 )
 @click.option("-v", "--verbose", is_flag=True, help="verbose output.")
 def main(**args):
@@ -597,6 +603,7 @@ def main(**args):
         dataloader_num_workers=args.dataloader_num_workers,
         dataloader_prefetch_factor=args.dataloader_prefetch_factor,
         dataloader_persistent_workers=True,
+        ignore_data_skip=args.ignore_data_skip,
         remove_unused_columns=False,
         report_to=report_to,                          # SwanLab + TensorBoard
         run_name=args.run_name,

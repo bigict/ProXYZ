@@ -182,9 +182,13 @@ def main(**args):
     # fully within 8 A is the last boundary <= 8, i.e. count(bins <= 8) - 1.
     distogram_cutoff_idx = int((processor.distogram_bins <= 8).sum(-1)) - 1
 
+    loss_fn = functools.partial(F.cross_entropy, ignore_index=processor.ignore_index)
+
     # Normal clasification mode
     results, features = [], []
-    for input_ids in tqdm(eval_dataloader, desc="classification"):
+    for input_ids in tqdm(
+        eval_dataloader, desc="classification", disable=not accelerator.is_main_process
+    ):
         input_ids = data_utils.prepare_inputs(processor, input_ids)
         with torch.no_grad():
             outputs = model(**input_ids, use_cache=False)
@@ -231,6 +235,20 @@ def main(**args):
                 "id": input_ids["id"][idx],
                 "length": input_ids[attention_mask_key][idx].sum().item() - 2
             }
+            ppl = torch.exp(
+                loss_fn(outputs.logits[idx][:-1, :], input_ids["labels"][idx][1:])
+            )
+            if outputs.char_logits is not None:
+                char_ppl = torch.exp(
+                    loss_fn(
+                        outputs.char_logits[idx][:-1, :],
+                        input_ids["char_labels"][idx][1:],
+                    )
+                )
+                result["PPL/char"] = char_ppl.item()
+                result["PPL/token"] = ppl.item()
+                ppl *= char_ppl
+            result["PPL"] = ppl.item()
             if distogram_metrics is not None:
                 result["valid"] = valid_length[idx].item()
                 for key, value in distogram_metrics.items():

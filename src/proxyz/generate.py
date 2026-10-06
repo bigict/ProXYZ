@@ -177,7 +177,9 @@ def main(**args):
 
     # Normal generation mode
     sequences = []
-    for input_ids in tqdm(prompt_dataloader, desc="generation"):
+    for input_ids in tqdm(
+        prompt_dataloader, desc="generation", disable=not accelerator.is_main_process
+    ):
         input_ids = data_utils.prepare_inputs(processor, input_ids)
         with torch.no_grad():
             out = model.generate(

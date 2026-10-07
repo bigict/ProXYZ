@@ -14,6 +14,7 @@ except:
 from Bio.Data.PDBData import protein_letters_3to1
 from biotite.structure import alphabet
 from datasets import Dataset
+import numpy as np
 import torch
 from tqdm import tqdm
 
@@ -82,7 +83,7 @@ def pdb_iterator(file_paths: Sequence[str], batch_size: int = 64):
             yield [dict(zip(batch, v)) for v in zip(*batch.values())]
 
 
-def pdb_transform(examples: dict):
+def pdb_transform(examples: dict, **kwargs):
     batch = []
     for pid, file_path in zip(examples["id"], examples["dataset"]):
         processed_dir = pathlib.Path(file_path).parent / "processed"
@@ -98,7 +99,7 @@ def pdb_transform(examples: dict):
         graph.coord_mask[:,cb_idx] = o
 
         batch.append(graph)
-    return pyg_transform(batch)
+    return pyg_transform(batch, **kwargs)
 
 
 @cache
@@ -146,6 +147,12 @@ def foldcomp_dataset(file_path: str):
                     def __contains__(self, key):
                         with self.env.begin() as txn:
                             return txn.get(pickle.dumps(key)) is not None
+
+                    def keys(self):
+                        with self.env.begin() as txn:
+                            with txn.cursor() as cursor:
+                                for key in cursor.iternext(keys=True, values=False):
+                                    yield pickle.loads(key)
 
                     def close(self):
                         self.env.close()
@@ -248,7 +255,7 @@ def foldcomp_iterator(file_paths: Sequence[str], batch_size: int = 64):
     if batch:
         yield batch
 
-def foldcomp_transform(examples: dict):
+def foldcomp_transform(examples: dict, **kwargs):
     bfactor_min = env("proxyz_dataset_foldcomp_bfactor_min", .0)
 
     batch = []
@@ -269,7 +276,7 @@ def foldcomp_transform(examples: dict):
                 [int(s.split(":")[2]) for s in graph.residue_id], dtype=torch.long
             )
         batch.append(graph)
-    return pyg_transform(batch, gly_idx=6)
+    return pyg_transform(batch, gly_idx=6, **kwargs)
 
 
 def pyg_dropout(
@@ -304,7 +311,7 @@ def pyg_dropout(
     return graph
 
 
-def pyg_transform(batch: list, gly_idx: int = 7) -> dict:
+def pyg_transform(batch: list, gly_idx: int = 7, **kwargs) -> dict:
     dropout_p = env("proxyz_dataset_pyg_dropout_p", .0)
     window_size = env("proxyz_dataset_pyg_dropout_window_size", 4)
     span_min = env("proxyz_dataset_pyg_dropout_span_min", 1)
@@ -366,8 +373,10 @@ def pyg_transform(batch: list, gly_idx: int = 7) -> dict:
         )
         cle.append(
             torch.from_numpy(
-                alphabet.i3d.Encoder().encode(*bbxyz.numpy()).filled()
-            ).long()
+                alphabet.i3d.Encoder().encode(*bbxyz.numpy()).astype(np.int64).filled(
+                    fill_value=kwargs.get("ignore_index", -100)
+                )
+            )
         )
 
     return {

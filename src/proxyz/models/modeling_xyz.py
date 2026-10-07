@@ -145,7 +145,7 @@ class XYZDistogram(nn.Module):
         self.right_proj = nn.Linear(config.char_hidden_size, config.distogram_intermediate_size)
         self.out_proj = nn.Linear(config.distogram_intermediate_size**2, config.distogram_bins_num)
         self.act_fn = ACT2FN[config.hidden_act]
-        self.eps = 1e-8
+        self.eps = 1e-6
 
     def forward(self, x: torch.FloatTensor, labels: torch.LongTensor | None = None, **kwargs) -> torch.FloatTensor:
         # x = torch.einsum(
@@ -952,7 +952,7 @@ class XYZForCausalLM(XYZPreTrainedModel, GenerationMixin):
                             **kwargs,
                         )
                     else:
-                        eps = 1e-8
+                        eps = 1e-6
                         distogram_loss = nn.functional.cross_entropy(
                             distogram_logits.reshape(-1, self.config.distogram_bins_num),
                             distogram_labels.reshape(-1),

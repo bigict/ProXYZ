@@ -18,7 +18,7 @@ def tokenize_function(
 
     transform = dataset.data_transform(data_format)
     if transform is not None:
-        examples = transform(examples)
+        examples = transform(examples, ignore_index=processor.ignore_index)
 
     batch_size = len(examples[processor.text_column])
     tokenized = processor(examples, **kwargs)

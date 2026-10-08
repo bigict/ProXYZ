@@ -95,6 +95,9 @@ class XYZConfig(PreTrainedConfig):
         layers; the outer product yields a ``distogram_intermediate_size²``
         feature per residue pair before the final classification layer.
 
+    distogram_cap(`float`, *optional*, defaults to 0):
+        If > 0, apply Tanh Soft-Cap to distoram logits.
+
     distogram_chunk_size (`int`, *optional*, defaults to 0):
         If > 0, compute the distogram in chunks of this size along the
         first sequence dimension to reduce peak memory.  ``0`` disables
@@ -169,6 +172,7 @@ class XYZConfig(PreTrainedConfig):
 
     distogram_bins_num: int = 64
     distogram_intermediate_size: int = 32
+    distogram_cap: float = 0.0
     distogram_chunk_size: int = 0  # 0 = no chunking (compute full bxL×L at once)
 
     def __post_init__(self, **kwargs):

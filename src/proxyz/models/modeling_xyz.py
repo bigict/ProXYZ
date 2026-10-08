@@ -145,6 +145,7 @@ class XYZDistogram(nn.Module):
         self.right_proj = nn.Linear(config.char_hidden_size, config.distogram_intermediate_size)
         self.out_proj = nn.Linear(config.distogram_intermediate_size**2, config.distogram_bins_num)
         self.act_fn = ACT2FN[config.hidden_act]
+        self.cap = config.distogram_cap
         self.eps = 1e-6
 
     def forward(self, x: torch.FloatTensor, labels: torch.LongTensor | None = None, **kwargs) -> torch.FloatTensor:
@@ -167,6 +168,8 @@ class XYZDistogram(nn.Module):
         x = (x + x.transpose(-2, -3)) / 2
         if self.out_proj.bias is not None:
             x = x + self.out_proj.bias
+        if self.cap > 0:
+            x = self.cap * (x / self.cap).tanh()
         return x.contiguous()  # FIX: self.loss_function
 
 

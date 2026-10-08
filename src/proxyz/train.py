@@ -139,6 +139,12 @@ from proxyz.utils import data_utils, model_utils, dict2object
     help="Character: CLE vocab size."
 )
 @click.option(
+    "--model_distogram_cap",
+    type=float,
+    default=0,
+    help="Character: if > 0, apply Tanh Soft-Cap to distoram logits."
+)
+@click.option(
     "--model_distogram_chunk_size",
     type=int,
     default=0,
@@ -367,6 +373,7 @@ def main(**args):
         has_cle_lm_head=args.model_has_cle_lm_head,
         has_distogram_lm_head=args.model_has_distogram_lm_head,
         cle_vocab_size=args.model_cle_vocab_size,
+        distogram_cap=args.model_distogram_cap,
         distogram_chunk_size=args.model_distogram_chunk_size,
     )
     model = XYZForCausalLM(config)
@@ -585,6 +592,7 @@ def main(**args):
         weight_decay=args.weight_decay,
         adam_beta1=0.9,
         adam_beta2=0.95,                              # DeepSeek beta2 standard
+        adam_epsilon=1e-6,
         logging_steps=args.logging_steps,
         save_steps=args.save_steps,
         eval_strategy=args.eval_strategy if (args.eval_files or args.dataset_eval_split) else "no",

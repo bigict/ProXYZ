@@ -3,7 +3,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 import math
 import pickle
-from typing import Sequence
+from typing import Literal, Sequence
 
 from datasets import Dataset
 import torch
@@ -17,13 +17,13 @@ from proxyz.utils import env
 # FIX: number of categories cannot exceed 2^24
 class HierarchicalWeightedRandomSampler(WeightedRandomSampler):
     def __iter__(self) -> Iterator[int]:
-        chunk_size = env("proxyz_data_sampler_chunk_size", 1<<23)
+        chunk_size = env("proxyz_dataset_sampler_chunk_size", 1<<23)
         if len(self.weights) <= chunk_size:
             yield from super().__iter__()
         else:
             assert self.replacement
 
-            if env("proxyz_data_sampler_chunk_squared", False):  # disabled, OOM !!!
+            if env("proxyz_dataset_sampler_chunk_squared", False):  # disabled, OOM !!!
                 chunk_num = int(math.ceil(math.sqrt(len(self.weights))))
                 assert chunk_num <= chunk_size
                 chunk_size = chunk_num  # NOTE: chunk_size == chunk_num here.
@@ -59,6 +59,18 @@ class HierarchicalWeightedRandomSampler(WeightedRandomSampler):
 def from_cluster_files(
     dataset: Dataset, file_paths: Sequence[str], generator: torch.Generator = None
 ) -> Sampler:
+    def reweighting(
+        data_row_ids: Sequence[str], method: Literal["inverse_log", "log"]
+    ) -> float:
+        # NOTE: return weight per item
+        if method == "inverse_log":
+            # Compute sampling weights: n / (1 + log(n)) for each cluster
+            return 1 / (1 + math.log(len(data_row_ids)))
+        elif method == "log":
+            # Compute sampling weights: (1 + log(n)) for each cluster
+            return (1 + math.log(len(data_row_ids))) / len(data_row_ids)
+        assert False, "Only `inverse_log` and `log` reweighting is supported."
+
     # Incredibly fast: Extracts the column directly as a PyArrow ChunkedArray
     seqeuence_to_idx = {
         seq: idx for idx, seq in enumerate(dataset.data["id"].to_pylist())
@@ -74,8 +86,9 @@ def from_cluster_files(
             data_row_id for data_row_id in data_row_ids if data_row_id in seqeuence_to_idx
         ]
         if data_row_ids:
-            # Compute sampling weights: n / (1 + log(n)) for each cluster
-            weight = 1 / (1 + math.log(len(data_row_ids)))
+            weight = reweighting(
+                data_row_ids, env("proxyz_dataset_sampler_reweighting", "inverse_log")
+            )
             for data_row_id in data_row_ids:
                 sample_weights[seqeuence_to_idx[data_row_id]] = weight
             num_samples += 1

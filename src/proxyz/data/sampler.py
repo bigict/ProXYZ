@@ -60,16 +60,20 @@ def from_cluster_files(
     dataset: Dataset, file_paths: Sequence[str], generator: torch.Generator = None
 ) -> Sampler:
     def reweighting(
-        data_row_ids: Sequence[str], method: Literal["inverse_log", "log"]
+        data_row_ids: Sequence[str],
+        method: Literal["inverse_log", "log"],
+        power: float = 1.0,
     ) -> float:
-        # NOTE: return weight per item
+        assert len(data_row_ids) > 0
         if method == "inverse_log":
             # Compute sampling weights: n / (1 + log(n)) for each cluster
-            return 1 / (1 + math.log(len(data_row_ids)))
+            w = len(data_row_ids) / (1 + math.log(len(data_row_ids)))
         elif method == "log":
             # Compute sampling weights: (1 + log(n)) for each cluster
-            return (1 + math.log(len(data_row_ids))) / len(data_row_ids)
-        assert False, "Only `inverse_log` and `log` reweighting is supported."
+            w = (1 + math.log(len(data_row_ids)))
+        else:
+            assert False, "Only `inverse_log` and `log` reweighting is supported."
+        return math.pow(w, power)
 
     # Incredibly fast: Extracts the column directly as a PyArrow ChunkedArray
     seqeuence_to_idx = {
@@ -87,8 +91,10 @@ def from_cluster_files(
         ]
         if data_row_ids:
             weight = reweighting(
-                data_row_ids, env("proxyz_dataset_sampler_reweighting", "inverse_log")
-            )
+                data_row_ids=data_row_ids,
+                method=env("proxyz_dataset_sampler_reweighting_method", "log"),
+                power=env("proxyz_dataset_sampler_reweighting_power", 1.0),
+            ) / len(data_row_ids)
             for data_row_id in data_row_ids:
                 sample_weights[seqeuence_to_idx[data_row_id]] = weight
             num_samples += 1

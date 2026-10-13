@@ -2,6 +2,7 @@
 
 ![GitHub License](https://img.shields.io/github/license/bigict/ProXYZ)
 [![Conventional Commits](https://img.shields.io/badge/Conventional%20Commits-1.0.0-yellow.svg)](https://conventionalcommits.org)
+![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/bigict/ProXYZ/pylint.yml)
 ![GitHub Release](https://img.shields.io/github/v/release/bigict/ProXYZ)
 
 A protein language model pre-training framework built on DeepSeek-style Llama blocks, featuring a **U-Net style dual-granularity architecture** with **structure-aware auxiliary heads** (CLE and distogram) and Fill-in-the-Middle training.

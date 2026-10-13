@@ -187,15 +187,16 @@ from proxyz.utils import data_utils, model_utils, dict2object
     "--max_sequence_length",
     type=int,
     default=None,
-    help="If set, randomly crop sequences longer than this to a subsequence of this length. "
-    "Useful for controlling memory usage with variable-length inputs.",
+    help="If set, randomly crop sequences longer than this to a subsequence of this "
+    "length. Useful for controlling memory usage with variable-length inputs.",
 )
 @click.option(
     "--fim_rate",
     type=float,
     default=0.0,
-    help="Probability of applying Fill-in-the-Middle (FIM) transformation to each sequence. "
-    "0.0 disables FIM, 1.0 applies FIM to all sequences (DeepSeek-Coder style).",
+    help="Probability of applying Fill-in-the-Middle (FIM) transformation to each "
+    "sequence. 0.0 disables FIM, 1.0 applies FIM to all sequences (DeepSeek-Coder "
+    "style).",
 )
 @click.option(
     "--fim_spm_rate",
@@ -213,7 +214,8 @@ from proxyz.utils import data_utils, model_utils, dict2object
     "--eval_strategy",
     type=click.Choice(["no", "steps", "epoch"]),
     default="steps",
-    help="When to run validation: 'steps' (every eval_steps), 'epoch' (end of each epoch), or 'no'.",
+    help="When to run validation: 'steps' (every eval_steps), 'epoch' (end of each "
+    "epoch), or 'no'.",
 )
 @click.option(
     "--eval_steps", type=int, default=500, help="Run validation every N steps."
@@ -248,15 +250,16 @@ from proxyz.utils import data_utils, model_utils, dict2object
 @click.option(
     "--resume_from_checkpoint",
     is_flag=True,
-    help="Load the last checkpoint in args.output_dir as saved by a previous instance of Trainer."
-    "Restores model weights, optimizer state, and training step.",
+    help="Load the last checkpoint in args.output_dir as saved by a previous instance "
+    "of Trainer. Restores model weights, optimizer state, and training step.",
 )
 @click.option(
     "--cluster_files",
     type=click.Path(),
     multiple=True,
     help="Clustering files for cluster-based sampling. Each file has two columns: "
-    "cluster_id and data_row_id. Sampling weight = n / (1 + log(n)) where n is cluster size.",
+    "cluster_id and data_row_id. Sampling weight = n / (1 + log(n)) where n is cluster "
+    "size.",
 )
 @click.option(
     "--random_seed",
@@ -320,6 +323,7 @@ def main(**args):
     use_cuda = torch.cuda.is_available()
 
     # Shared config parameters
+    # pylint: disable=unexpected-keyword-arg
     config = XYZConfig(
         vocab_size=vocab_size,
         hidden_size=args.model_hidden_size,
@@ -349,6 +353,7 @@ def main(**args):
         distogram_cap=args.model_distogram_cap,
         distogram_chunk_size=args.model_distogram_chunk_size,
     )
+    # pylint: enable=unexpected-keyword-arg
     model = XYZForCausalLM(config)
 
     # Ensure all parameters are bf16 — FlashAttention requires fp16 or bf16
@@ -359,7 +364,7 @@ def main(**args):
     if args.verbose:
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f"--- Dense DeepSeek-Style Model ---")
+        print(f"--- Dense DeepSeek-Style Model ---")  # pylint: disable=f-string-without-interpolation
         if config.has_characterization:
             print("Use U-net style XYZForCausalLM instead of standard Llama attention.")
         print(f"Attention backend:   {args.attn_implementation}")
@@ -398,7 +403,7 @@ def main(**args):
     if args.cluster_files:
         train_sampler = sampler.from_cluster_files(train_dataset, args.cluster_files)
         if args.verbose:
-            print(f"--- Cluster-based sampling ---")
+            print(f"--- Cluster-based sampling ---")  # pylint: disable=f-string-without-interpolation
             print(f"Clusters: {len(train_sampler):,}")
 
     # Apply tokenization
@@ -418,10 +423,10 @@ def main(**args):
         eval_dataset = eval_dataset.with_transform(tokenize_function)
 
     if args.verbose:
-        print(f"--- Train dataset ---")
+        print(f"--- Train dataset ---")  # pylint: disable=f-string-without-interpolation
         print(f"Examples: {len(train_dataset):,}")
         if eval_dataset:
-            print(f"--- Eval dataset ---")
+            print(f"--- Eval dataset ---")  # pylint: disable=f-string-without-interpolation
             print(f"Examples: {len(eval_dataset):,}")
 
     # ==========================================
@@ -464,6 +469,7 @@ def main(**args):
             if not hasattr(self, "_last_logged"):
                 self._last_logged = self._globalstep_last_logged
 
+            # pylint: disable=line-too-long
             if (
                 self.args.average_tokens_across_devices
                 and (self.model_accepts_loss_kwargs or self.compute_loss_func)
@@ -477,6 +483,7 @@ def main(**args):
                 loss_scale = loss_scale if self.args.n_gpu <= 1 else self.args.n_gpu
             else:
                 loss_scale = 1
+            # pylint: enable=line-too-long
 
             def logs_update(key, val):
                 if self.model.training:
@@ -491,7 +498,9 @@ def main(**args):
                     else:
                         self._logs[key] = [val]
 
-            n_fim, n_std = inputs["is_fim"].sum().item(), (~inputs["is_fim"]).sum().item()
+            n_fim, n_std = (
+                inputs["is_fim"].sum().item(), (~inputs["is_fim"]).sum().item()
+            )
             for tag, n in [("fim", n_fim), ("std", n_std)]:
                 logs_update(f"n_{tag}", n * loss_scale)
                 if n > 0:
@@ -517,7 +526,7 @@ def main(**args):
             super().log(logs, start_time=start_time)
 
     report_to = list(args.report_to) if args.report_to else []
-    if report_to == ["none"] or report_to == ["all"]:
+    if report_to in (["none"], ["all"]):
         report_to = "".join(report_to)
 
     # TensorBoard log directory (set via env var; `logging_dir` kwarg is deprecated)
@@ -532,21 +541,21 @@ def main(**args):
         warmup_steps=args.warmup_steps,
         weight_decay=args.weight_decay,
         adam_beta1=0.9,
-        adam_beta2=0.95,                              # DeepSeek beta2 standard
+        adam_beta2=0.95,                           # DeepSeek beta2 standard
         adam_epsilon=1e-6,
         logging_steps=args.logging_steps,
         save_steps=args.save_steps,
-        eval_strategy=args.eval_strategy if (args.eval_files or args.dataset_eval_split) else "no",
+        eval_strategy=args.eval_strategy if args.eval_files else "no",
         eval_steps=args.eval_steps if args.eval_strategy == "steps" else None,
         per_device_eval_batch_size=args.per_device_train_batch_size,
         eval_accumulation_steps=args.gradient_accumulation_steps,
-        eval_on_start=True if args.eval_files else False,
+        eval_on_start=bool(args.eval_files),
         label_names=["labels"] + features,
         prediction_loss_only=True,
         gradient_checkpointing=args.gradient_checkpointing,
-        bf16=use_cuda,                                # bf16 is preferred over fp16 on modern GPUs
-        torch_compile=args.torch_compile,             # compiles PyTorch code
-        ddp_find_unused_parameters=False,             # disabled warning
+        bf16=use_cuda,                            # bf16 is preferred on modern GPUs
+        torch_compile=args.torch_compile,         # compiles PyTorch code
+        ddp_find_unused_parameters=False,         # disabled warning
         num_train_epochs=args.num_train_epochs,
         max_steps=args.max_steps,
         dataloader_num_workers=args.dataloader_num_workers,
@@ -554,7 +563,7 @@ def main(**args):
         dataloader_persistent_workers=True,
         ignore_data_skip=args.ignore_data_skip,
         remove_unused_columns=False,
-        report_to=report_to,                          # SwanLab + TensorBoard
+        report_to=report_to,                      # SwanLab + TensorBoard
         run_name=args.run_name,
     )
 
@@ -563,7 +572,7 @@ def main(**args):
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        processing_class=processor,                  # transformers >=5 renamed `tokenizer`
+        processing_class=processor,               # transformers >=5 renamed `tokenizer`
         train_sampler=train_sampler,
     )
 
@@ -572,10 +581,10 @@ def main(**args):
     # ==========================================
     # SwanLab >=0.8 requires an explicit init before the callback can get_run().
     # We init it ourselves so the SwanLabCallback's setup() finds an active run.
-    _swanlab_active = False
+    swanlab_active = False
     if report_to != "none" and "swanlab" in report_to:
         try:
-            import swanlab
+            import swanlab  # pylint: disable=import-outside-toplevel
 
             swanlab_mode = os.environ.get("SWANLAB_MODE", "cloud")
             swanlab.init(
@@ -583,8 +592,8 @@ def main(**args):
                 project=os.environ.get("SWANLAB_PROJECT", "proxyz"),
                 mode=swanlab_mode,
             )
-            _swanlab_active = True
-        except Exception as e:
+            swanlab_active = True
+        except ImportError as e:
             print(f"[warn] SwanLab init failed ({e}), continuing without SwanLab.")
 
     # Start or resume pre-training
@@ -593,8 +602,8 @@ def main(**args):
     trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
 
     # Finish SwanLab run
-    if _swanlab_active:
-        import swanlab
+    if swanlab_active:
+        import swanlab  # pylint: disable=import-outside-toplevel
         swanlab.finish()
 
     # Save final weights and configuration

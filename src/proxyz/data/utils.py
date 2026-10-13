@@ -31,7 +31,7 @@ def opener(file_path: str, mode: str = "r"):
 def semaphore(name: str, value: int = 0):
     if value >= 0:  # disabled when value < 0
         try:
-            import posix_ipc
+            import posix_ipc  # pylint: disable=import-outside-toplevel
             with posix_ipc.Semaphore(
                 f"/{name}", flags=posix_ipc.O_CREAT, initial_value=value
             ) as sem:

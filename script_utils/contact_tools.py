@@ -2,7 +2,6 @@ import os
 import functools
 
 import click
-from datasets import Dataset
 import pandas as pd
 from transformers import PreTrainedTokenizerFast
 import torch
@@ -69,16 +68,7 @@ def main(**args):
     )
 
     # Load from local files
-    iterator = dataset.data_iterator(args.data_format)
-
-    # Flatten the batched iterators into one-sequence-per-example records.
-    def data_generator(data_files):
-        for batch in iterator(data_files):
-            yield from batch
-
-    eval_dataset = Dataset.from_generator(
-        functools.partial(data_generator, args.data_files)
-    )
+    eval_dataset = data_utils.create_dataset(args.data_files, args.data_format)
     if args.verbose:
         print(f"--- Evaluation-dataset ---")
         print(f"Dataset: {len(eval_dataset):,}")

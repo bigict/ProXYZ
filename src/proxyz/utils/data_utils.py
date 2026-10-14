@@ -1,9 +1,21 @@
 import random
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
+from datasets import Dataset
 import torch
 
 from proxyz.data import dataset
+
+
+def create_dataset(data_files: Sequence[str], data_format: str) -> Dataset:
+    # Flatten the batched iterators into one-sequence-per-example records.
+    def data_generator():
+        iterator = dataset.data_iterator(data_format)
+        # Load from local files
+        for batch in iterator(data_files):
+            yield from batch
+
+    return Dataset.from_generator(data_generator)
 
 
 def tokenize_function(

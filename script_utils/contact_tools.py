@@ -74,17 +74,13 @@ def main(**args):
         print(f"Dataset: {len(eval_dataset):,}")
 
     # Apply tokenization
-    def tokenize_dataset(dataset):
-        return dataset.with_transform(
-            functools.partial(
-                data_utils.tokenize_function,
-                processor,
-                args.data_format,
-                char_apply=True,
-            )
-        )
-
-    eval_dataset = tokenize_dataset(eval_dataset)
+    tokenize_function = functools.partial(
+        data_utils.tokenize_function,
+        processor,
+        args.data_format,
+        char_apply=True,
+    )
+    eval_dataset = eval_dataset.with_transform(tokenize_function)
 
     # distogram to contact
     distogram_cutoff_idx = int((processor.distogram_bins <= 8).sum(-1)) - 1

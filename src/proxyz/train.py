@@ -402,24 +402,20 @@ def main(**args):
             print(f"Clusters: {len(train_sampler):,}")
 
     # Apply tokenization
-    def tokenize_dataset(dataset):
-        return dataset.with_transform(
-            functools.partial(
-                data_utils.tokenize_function,
-                processor,
-                args.data_format,
-                bpe_dropout=args.tokenizer_bpe_dropout,
-                char_apply=config.has_characterization,
-                fim_rate=args.fim_rate,
-                fim_spm_rate=args.fim_spm_rate,
-                fim_sft_style=args.fim_sft_style,
-                max_length=max_sequence_length,
-            )
-        )
-
-    train_dataset = tokenize_dataset(train_dataset)
+    tokenize_function = functools.partial(
+        data_utils.tokenize_function,
+        processor,
+        args.data_format,
+        bpe_dropout=args.tokenizer_bpe_dropout,
+        char_apply=config.has_characterization,
+        fim_rate=args.fim_rate,
+        fim_spm_rate=args.fim_spm_rate,
+        fim_sft_style=args.fim_sft_style,
+        max_length=max_sequence_length,
+    )
+    train_dataset = train_dataset.with_transform(tokenize_function)
     if eval_dataset:
-        eval_dataset = tokenize_dataset(eval_dataset)
+        eval_dataset = eval_dataset.with_transform(tokenize_function)
 
     if args.verbose:
         print(f"--- Train dataset ---")

@@ -141,21 +141,17 @@ def main(**args):
     # 3. ENCODE PROMPT & CLASSIFY IN BATCHES # ==========================================
     # Ban all tokens whose string representation contains "X" (unknown residue).
     # This prevents the model from emitting ambiguous amino-acid placeholders.
+    eval_dataset = data_utils.create_dataset(args.data_files, args.data_format)
 
     # Apply tokenization
-    def tokenize_dataset(eval_dataset):
-        return eval_dataset.with_transform(
-            functools.partial(
-                data_utils.tokenize_function,
-                processor,
-                args.data_format,
-                char_apply=model.config.has_characterization,
-                max_length=args.max_sequence_length,
-            )
-        )
-
-    eval_dataset = data_utils.create_dataset(args.data_files, args.data_format)
-    eval_dataset = tokenize_dataset(eval_dataset)
+    tokenize_function = functools.partial(
+        data_utils.tokenize_function,
+        processor,
+        args.data_format,
+        char_apply=model.config.has_characterization,
+        max_length=args.max_sequence_length,
+    )
+    eval_dataset = eval_dataset.with_transform(tokenize_function)
 
     # Load cluster information and compute sampling weights if cluster files provided
     eval_sampler = None

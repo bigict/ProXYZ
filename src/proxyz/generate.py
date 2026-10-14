@@ -155,20 +155,17 @@ def main(**args):
         for idx in range(args.num_sequences):
             yield {processor.text_column: args.prompt}
 
-    # Apply tokenization
-    def tokenize_dataset(prompt_dataset):
-        return prompt_dataset.with_transform(
-            functools.partial(
-                data_utils.tokenize_function,
-                processor,
-                "line",
-                char_apply=model.config.has_characterization,
-                generate=True,
-            )
-        )
-
     prompt_dataset = Dataset.from_generator(data_generator)
-    prompt_dataset = tokenize_dataset(prompt_dataset)
+
+    # Apply tokenization
+    tokenize_function = functools.partial(
+        data_utils.tokenize_function,
+        processor,
+        "line",
+        char_apply=model.config.has_characterization,
+        generate=True,
+    )
+    prompt_dataset = prompt_dataset.with_transform(tokenize_function)
 
     prompt_dataloader = DataLoader(
         prompt_dataset, batch_size=args.batch_size, shuffle=False, pin_memory=True

@@ -21,39 +21,27 @@ class HierarchicalWeightedRandomSampler(WeightedRandomSampler):
         if len(self.weights) <= chunk_size:
             yield from super().__iter__()
         else:
-            assert self.replacement
+            # Split to chunks
+            rows = self.weights.split(chunk_size)
 
-            if env("proxyz_dataset_sampler_chunk_squared", False):  # disabled, OOM !!!
-                chunk_num = int(math.ceil(math.sqrt(len(self.weights))))
-                assert chunk_num <= chunk_size
-                chunk_size = chunk_num  # NOTE: chunk_size == chunk_num here.
-                padding_size = chunk_num**2 - len(self.weights)
-            else:
-                padding_size = (chunk_size - len(self.weights) % chunk_size) % chunk_size
-                chunk_num = len(self.weights) // chunk_size + (padding_size > 0)
-
-
-            # weights = self.weights
-            if padding_size > 0:
-                self.weights = torch.cat(
-                    (self.weights, self.weights.new_zeros((padding_size, )))
-                )
-            weights = self.weights.view(chunk_num, -1)
-            col_indices = torch.multinomial(
-                weights.sum(0), self.num_samples, self.replacement, generator=self.generator
+            # Sample which chunks to draw from
+            cnt = torch.bincount(
+                torch.multinomial(
+                    torch.stack([row.sum() for row in rows]),
+                    self.num_samples,
+                    replacement=True,
+                    generator=self.generator
+                ), minlength=len(rows)
             )
-            row_indices = torch.multinomial(
-                weights[:, col_indices].T, 1, self.replacement, generator=self.generator
-            ).view(-1)
 
-            rand_tensor = row_indices * chunk_size + col_indices
-            assert torch.all(rand_tensor < len(self.weights))
-            del row_indices, col_indices
-
-            rand_indices = array("I", rand_tensor)
-            del rand_tensor
-
-            yield from iter(rand_indices)
+            # Sample within each chunk
+            for idx, row in enumerate(rows):
+                replacement = self.replacement if cnt[idx] <= row.size(0) else True
+                col_indices = torch.multinomial(
+                    row + 1e-8, cnt[idx].item(), replacement, generator=self.generator
+                )
+                rand_indices = array("I", idx * chunk_size + col_indices)
+                yield from iter(rand_indices)
 
 
 def from_cluster_files(
@@ -103,7 +91,7 @@ def from_cluster_files(
     sampler = HierarchicalWeightedRandomSampler(
         weights=sample_weights,
         num_samples=num_samples,  # FIX: use #cluster_size instead of #samples
-        replacement=True,
+        replacement=False,
         generator=generator,
     )
     return sampler

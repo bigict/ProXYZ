@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 try:
     from biglist import Biglist
     HAVE_BIGLIST = True
-except:
+except ImportError:
     HAVE_BIGLIST = False
 from Bio.Data.PDBData import protein_letters_3to1
 from biotite.structure import alphabet
@@ -119,7 +119,7 @@ def foldcomp_dataset(file_path: str):
 
             # Read in id_to_idx file
             ID2IDX_FILE = pathlib.Path(self.root) / f"{self.database}.id_to_idx"
-            with semaphore("proxyz_dataset_foldcomp_database_lookup", 1) as sem:
+            with semaphore("proxyz_dataset_foldcomp_database_lookup", 1):
                 class Protein2Idx:
                     def __init__(self):
                         if ID2IDX_FILE.exists():
@@ -281,6 +281,7 @@ def foldcomp_transform(examples: dict, **kwargs):
 
 def pyg_dropout(
     graph,
+    *,
     p: float = 0,
     window_size: int = 4,
     span_min: int = 1,
@@ -341,7 +342,7 @@ def pyg_transform(batch: list, gly_idx: int = 7, **kwargs) -> dict:
         seq.append("".join(protein_letters_3to1.get(r, "A") for r in graph.residues))
 
         # pseudo_beta
-        is_gly = (graph.residue_type == gly_idx)
+        is_gly = graph.residue_type == gly_idx
         pseudo_beta.append(
             torch.where(
                 is_gly[:, None], graph.coords[:, ca_idx, :], graph.coords[:, cb_idx, :]

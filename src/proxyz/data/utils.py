@@ -7,8 +7,7 @@ logger = logging.getLogger(__name__)
 
 
 def lines(f):
-    for line in filter(lambda x: x, map(lambda x: x.strip(), f)):
-        yield line
+    yield from filter(lambda x: x, map(lambda x: x.strip(), f))
 
 
 @contextlib.contextmanager
@@ -38,6 +37,6 @@ def semaphore(name: str, value: int = 0):
             ) as sem:
                 yield sem
             return
-        except Exception as e:
-            logger.warning(f"Create semaphore {name} failed: {e}")
+        except ImportError as e:
+            logger.warning("Create semaphore %s failed: %s", name, e)
     yield None

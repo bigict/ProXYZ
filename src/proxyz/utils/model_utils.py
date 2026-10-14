@@ -30,8 +30,8 @@ def resolve_model_path(model_dir: str) -> str:
     checkpoints = [c for c in checkpoints if re.search(r"checkpoint-(\d+)$", c)]
     if not checkpoints:
         raise ValueError(
-            f"No model weights found in {model_dir} and no checkpoint-* subdirectories. "
-            "Pass --model_dir pointing at a trained model or checkpoint."
+            f"No model weights found in {model_dir} and no checkpoint-* subdirectories."
+            " Pass --model_dir pointing at a trained model or checkpoint."
         )
     latest = max(
         checkpoints, key=lambda c: int(re.search(r"checkpoint-(\d+)$", c).group(1))

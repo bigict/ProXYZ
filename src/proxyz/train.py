@@ -4,7 +4,7 @@ import random
 from typing import Any
 
 import click
-from datasets import Dataset, load_dataset
+from datasets import Dataset
 import torch
 from transformers import PreTrainedTokenizerFast, Trainer, TrainingArguments
 
@@ -17,32 +17,6 @@ from proxyz.utils import data_utils, model_utils, dict2object
 @click.argument("data_files", type=click.Path(), nargs=-1)
 @click.option(
     "--eval_files", type=click.Path(), multiple=True, help="Evaluate data files"
-)
-@click.option(
-    "--dataset_name",
-    type=str,
-    default=None,
-    help="HuggingFace dataset name (e.g. 'HuggingFaceH4/gsm8k'). "
-    "If provided, loads from HuggingFace instead of DATA_FILES.",
-)
-@click.option(
-    "--dataset_config",
-    type=str,
-    default=None,
-    help="HuggingFace dataset config/subset (e.g. 'main').",
-)
-@click.option(
-    "--dataset_split",
-    type=str,
-    default="train",
-    help="Split to use for training (default: 'train').",
-)
-@click.option(
-    "--dataset_eval_split",
-    type=str,
-    default=None,
-    help="Split to use for validation (e.g. 'validation', 'test'). "
-    "If not set, no eval dataset is loaded from HuggingFace.",
 )
 @click.option(
     "--text_column",
@@ -313,11 +287,10 @@ def main(**args):
     # ==========================================
     # 0. CHECK DATA SOURCE IS PROVIDED
     # ==========================================
-    if not args.data_files and not args.dataset_name:
+    if not args.data_files:
         raise click.UsageError(
             "No data source given. Pass one or more sequence files, e.g. "
-            "`train.py data.txt --tokenizer_file uniref90_30000.json`, "
-            "or use --dataset_name to load from HuggingFace. "
+            "`train.py data.txt --tokenizer_file uniref90_30000.json`. "
             "Use '-' to read from stdin."
         )
 
@@ -414,39 +387,11 @@ def main(**args):
     if max_sequence_length is None:
         max_sequence_length = args.max_position_embeddings
 
-    # Load dataset from HuggingFace or local files
-    if args.dataset_name:
-        # Load from HuggingFace Hub
-        print(f"Loading dataset from HuggingFace: {args.dataset_name}")
-        train_dataset = load_dataset(
-            args.dataset_name,
-            name=args.dataset_config,
-            split=args.dataset_split,
-        )
-        eval_dataset = None
-        if args.dataset_eval_split:
-            eval_dataset = load_dataset(
-                args.dataset_name,
-                name=args.dataset_config,
-                split=args.dataset_eval_split,
-            )
-    else:
-        # Load from local files
-        iterator = dataset.data_iterator(args.data_format)
-
-        # Flatten the batched iterators into one-sequence-per-example records.
-        def data_generator(data_files):
-            for batch in iterator(data_files):
-                yield from batch
-
-        train_dataset = Dataset.from_generator(
-            functools.partial(data_generator, args.data_files)
-        )
-        eval_dataset = None
-        if args.eval_files:
-            eval_dataset = Dataset.from_generator(
-                functools.partial(data_generator, args.eval_files)
-            )
+    # Load dataset from local files
+    train_dataset = data_utils.create_dataset(args.data_files, args.data_format)
+    eval_dataset = None
+    if args.eval_files:
+        eval_dataset = data_utils.create_dataset(args.eval_files, args.data_format)
 
     # Load cluster information and compute sampling weights if cluster files provided
     train_sampler = None

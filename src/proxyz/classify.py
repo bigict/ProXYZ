@@ -5,7 +5,6 @@ import functools
 from accelerate import Accelerator
 from accelerate.utils import gather_object
 import click
-from datasets import Dataset
 import pandas as pd
 import torch
 from torch.nn import functional as F
@@ -143,12 +142,6 @@ def main(**args):
     # Ban all tokens whose string representation contains "X" (unknown residue).
     # This prevents the model from emitting ambiguous amino-acid placeholders.
 
-    # Flatten the batched iterators into one-sequence-per-example records.
-    def data_generator():
-        iterator = dataset.data_iterator(args.data_format)
-        for batch in iterator(args.data_files):
-            yield from batch
-
     # Apply tokenization
     def tokenize_dataset(eval_dataset):
         return eval_dataset.with_transform(
@@ -161,7 +154,7 @@ def main(**args):
             )
         )
 
-    eval_dataset = Dataset.from_generator(data_generator)
+    eval_dataset = data_utils.create_dataset(args.data_files, args.data_format)
     eval_dataset = tokenize_dataset(eval_dataset)
 
     # Load cluster information and compute sampling weights if cluster files provided

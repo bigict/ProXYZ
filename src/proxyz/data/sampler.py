@@ -17,7 +17,7 @@ from proxyz.utils import env
 # FIX: number of categories cannot exceed 2^24
 class HierarchicalWeightedRandomSampler(WeightedRandomSampler):
     def __iter__(self) -> Iterator[int]:
-        chunk_size = env("proxyz_dataset_sampler_chunk_size", 1<<23)
+        chunk_size = env("proxyz_dataset_sampler_chunk_size", 1 << 23)
         if len(self.weights) <= chunk_size:
             yield from super().__iter__()
         else:
@@ -31,7 +31,8 @@ class HierarchicalWeightedRandomSampler(WeightedRandomSampler):
                     self.num_samples,
                     replacement=True,
                     generator=self.generator
-                ), minlength=len(rows)
+                ),
+                minlength=len(rows),
             )
 
             # Sample within each chunk
@@ -64,18 +65,16 @@ def from_cluster_files(
         return math.pow(w, power)
 
     # Incredibly fast: Extracts the column directly as a PyArrow ChunkedArray
-    seqeuence_to_idx = {
-        seq: idx for idx, seq in enumerate(dataset.data["id"].to_pylist())
-    }
+    seq_to_idx = {seq: idx for idx, seq in enumerate(dataset.data["id"].to_pylist())}
 
     num_samples = 0
 
     # Assign weights to each sample
     sample_weights = [0.0] * len(dataset)  # disabled by default
-    for cluster_id, data_row_ids in iter_cluster_map(file_paths):
+    for _, data_row_ids in iter_cluster_map(file_paths):
         # Filtering
         data_row_ids = [
-            data_row_id for data_row_id in data_row_ids if data_row_id in seqeuence_to_idx
+            data_row_id for data_row_id in data_row_ids if data_row_id in seq_to_idx
         ]
         if data_row_ids:
             weight = reweighting(
@@ -84,7 +83,7 @@ def from_cluster_files(
                 power=env("proxyz_dataset_sampler_reweighting_power", 1.0),
             ) / len(data_row_ids)
             for data_row_id in data_row_ids:
-                sample_weights[seqeuence_to_idx[data_row_id]] = weight
+                sample_weights[seq_to_idx[data_row_id]] = weight
             num_samples += 1
 
     # Create WeightedRandomSampler
@@ -112,9 +111,9 @@ def iter_cluster_map(file_paths: Sequence[str]):
     def cluster_map_from_db(file_path):
         import lmdb
 
-        with lmdb.open(file_path, readonly=True, lock=False, max_dbs=1) as env:
-            db = env.open_db(b"cluster_map", dupsort=True)
-            with env.begin() as txn:
+        with lmdb.open(file_path, readonly=True, lock=False, max_dbs=1) as ctx:
+            db = ctx.open_db(b"cluster_map", dupsort=True)
+            with ctx.begin() as txn:
                 cursor = txn.cursor(db=db)
                 if cursor.first():
                     while True:

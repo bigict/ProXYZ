@@ -148,7 +148,7 @@ class XYZDistogram(nn.Module):
         self.cap = config.distogram_cap
         self.eps = 1e-6
 
-    def forward(self, x: torch.FloatTensor, labels: torch.LongTensor | None = None, **kwargs) -> torch.FloatTensor:
+    def forward(self, x: torch.FloatTensor) -> torch.FloatTensor:
         # x = torch.einsum(
         #     "... i c, ... j d -> ... i j c d", self.left_proj(x), self.right_proj(x)
         # )
@@ -767,11 +767,6 @@ class XYZForCausalLM(XYZPreTrainedModel, GenerationMixin):
         if config.has_cle_lm_head:
             self.cle_lm_head = nn.Linear(config.char_hidden_size, config.cle_vocab_size, bias=False)
         if config.has_distogram_lm_head:
-            # self.distogram_head = nn.Sequential(
-            #     nn.Linear(config.char_hidden_size, config.char_hidden_size, bias=False),
-            #     nn.GELU(),
-            #     nn.Linear(config.char_hidden_size, config.distogram_bins_num, bias=False),
-            # )
             self.distogram_head = XYZDistogram(config)
 
         # Initialize weights and apply final processing
@@ -787,6 +782,7 @@ class XYZForCausalLM(XYZPreTrainedModel, GenerationMixin):
         past_key_values: Cache | None = None,
         inputs_embeds: torch.FloatTensor | None = None,
         labels: torch.LongTensor | None = None,
+        use_cache: bool | None = None,
         logits_to_keep: int | torch.Tensor = 0,
         char_input_ids: torch.LongTensor | None = None,
         char_attention_mask: torch.Tensor | None = None,
@@ -798,7 +794,6 @@ class XYZForCausalLM(XYZPreTrainedModel, GenerationMixin):
         cle_labels: torch.LongTensor | None = None,
         distogram_labels: torch.LongTensor | None = None,
         repr_char_idx: torch.LongTensor | None = None,
-        use_cache: bool | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> XYZCausalLMOutputWithPast:
         """

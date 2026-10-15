@@ -6,6 +6,7 @@ import pickle
 from typing import Literal, Sequence
 
 from datasets import Dataset
+import numpy as np
 import torch
 from torch.utils.data import Sampler, WeightedRandomSampler
 from tqdm import tqdm
@@ -48,7 +49,7 @@ class HierarchicalWeightedRandomSampler(WeightedRandomSampler):
             # FIX: Global Shuffle to restore IID assumption
             rand_indices = torch.cat(rand_indices)
             perm = torch.randperm(len(rand_indices), generator=self.generator)
-            rand_indices = array("I", rand_indices[perm])
+            rand_indices = array("I", rand_indices[perm].contiguous())
 
             yield from iter(rand_indices)
 
@@ -78,7 +79,7 @@ def from_cluster_files(
     num_samples = 0
 
     # Assign weights to each sample
-    sample_weights = [0.0] * len(dataset)  # disabled by default
+    sample_weights = np.zeros(len(dataset), dtype=np.float32)  # disabled by default
     for _, data_row_ids in iter_cluster_map(file_paths):
         # Filtering
         data_row_ids = [
@@ -89,9 +90,9 @@ def from_cluster_files(
                 data_row_ids=data_row_ids,
                 method=env("proxyz_dataset_sampler_reweighting_method", "log"),
                 power=env("proxyz_dataset_sampler_reweighting_power", 1.0),
-            ) / len(data_row_ids)
-            for data_row_id in data_row_ids:
-                sample_weights[seq_to_idx[data_row_id]] = weight
+            )
+            indices = [seq_to_idx[data_row_id] for data_row_id in data_row_ids]
+            sample_weights[indices] = weight / len(data_row_ids)
             num_samples += 1
 
     # Create WeightedRandomSampler

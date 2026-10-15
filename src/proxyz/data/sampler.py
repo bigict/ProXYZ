@@ -35,14 +35,22 @@ class HierarchicalWeightedRandomSampler(WeightedRandomSampler):
                 minlength=len(rows),
             )
 
+            rand_indices = []
+
             # Sample within each chunk
             for idx, row in enumerate(rows):
                 replacement = self.replacement if cnt[idx] <= row.size(0) else True
                 col_indices = torch.multinomial(
                     row + 1e-8, cnt[idx].item(), replacement, generator=self.generator
                 )
-                rand_indices = array("I", idx * chunk_size + col_indices)
-                yield from iter(rand_indices)
+                rand_indices.append(idx * chunk_size + col_indices)
+
+            # FIX: Global Shuffle to restore IID assumption
+            rand_indices = torch.cat(rand_indices)
+            perm = torch.randperm(len(rand_indices), generator=self.generator)
+            rand_indices = array("I", rand_indices[perm])
+
+            yield from iter(rand_indices)
 
 
 def from_cluster_files(

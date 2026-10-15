@@ -37,7 +37,10 @@ from proxyz.utils import data_utils, dict2object, model_utils
     "may stop earlier; use --force_length to always generate exactly this many.",
 )
 @click.option(
-    "-n", "--num_sequences", type=int, default=10, help="How many sequences to generate."
+    "-n", "--num_sequences",
+    type=int,
+    default=10,
+    help="How many sequences to generate.",
 )
 @click.option(
     "--prompt",
@@ -54,7 +57,9 @@ from proxyz.utils import data_utils, dict2object, model_utils
 @click.option("--temperature", type=float, default=1.0, help="Sampling temperature.")
 @click.option("--top_p", type=float, default=0.95, help="Nucleus (top-p) sampling.")
 @click.option("--top_k", type=int, default=0, help="Top-k sampling (0 disables).")
-@click.option("--batch_size", type=int, default=8, help="Sequences generated per batch.")
+@click.option(
+    "--batch_size", type=int, default=8, help="Sequences generated per batch."
+)
 @click.option(
     "--output_dir",
     type=click.Path(),
@@ -71,7 +76,8 @@ from proxyz.utils import data_utils, dict2object, model_utils
 @click.option(
     "--use_cache",
     is_flag=True,
-    help="Enable model to compute and store the key/value hidden states for past tokens",
+    help="Enable model to compute and store the key/value hidden states for past "
+    "tokens",
 )
 @click.option("-v", "--verbose", is_flag=True, help="verbose output.")
 def main(**args):
@@ -88,7 +94,7 @@ def main(**args):
     model_path = model_utils.resolve_model_path(args.model_dir)
     processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
 
-    if processor.tokenizer.bos_token_id is None or processor.tokenizer.eos_token_id is None:
+    if processor.tokenizer.bos_token_id is None or processor.tokenizer.eos_token_id is None:  # pylint: disable=line-too-long
         raise click.UsageError(
             "Tokenizer has no [BOS]/[EOS]. Retrain with the updated train.py "
             "(which adds them) or point --model_dir at such a model."
@@ -110,13 +116,15 @@ def main(**args):
     model = model.to(device).eval()
 
     if args.verbose:
-        print(f"--- ProXYZ Generation ---")
+        # pylint: disable=line-too-long
+        print(f"--- ProXYZ Generation ---")  # pylint: disable=f-string-without-interpolation
         print(f"Model:       {model_path}")
         print(f"Device:      {device}  dtype={dtype}  attn={attn_impl}")
         print(f"Vocab size:  {len(processor.tokenizer)}  bos={processor.tokenizer.bos_token_id} eos={processor.tokenizer.eos_token_id}")
         print(f"Prompt:      {args.prompt!r}")
         mode = "exactly" if args.force_length else "up to"
         print(f"Target:      {mode} {args.num_tokens} new tokens x {args.num_sequences} seqs")
+        # pylint: enable=line-too-long
 
     # ==========================================
     # 3. BUILD GENERATION CONFIG
@@ -152,7 +160,7 @@ def main(**args):
             print(f"Suppressed {len(suppress_ids)} tokens containing 'X'")
 
     def data_generator():
-        for idx in range(args.num_sequences):
+        for _ in range(args.num_sequences):
             yield {processor.text_column: args.prompt}
 
     prompt_dataset = Dataset.from_generator(data_generator)

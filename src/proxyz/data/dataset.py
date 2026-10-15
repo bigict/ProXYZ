@@ -32,7 +32,7 @@ def line_iterator(file_paths: Sequence[str], batch_size=64):
 
     i = 0
     for file_path in file_paths:
-        with opener(file_path) as f:
+        with opener(file_path) as f:  # pylint: disable=contextmanager-generator-missing-cleanup
             for line in lines(f):
                 batch.append({"id": i, "text": line})
                 i += 1
@@ -44,7 +44,7 @@ def line_iterator(file_paths: Sequence[str], batch_size=64):
 
 
 def fasta_parse(file_path: str):
-    with opener(file_path) as f:
+    with opener(file_path) as f:  # pylint: disable=contextmanager-generator-missing-cleanup
         description, text = "", ""
         for line in lines(f):
             if line.startswith(">"):
@@ -104,21 +104,23 @@ def pdb_transform(examples: dict, **kwargs):
 
 @cache
 def foldcomp_dataset(file_path: str):
+    # pylint: disable=import-outside-toplevel
     import foldcomp
     from graphein.ml.datasets.foldcomp_dataset import FoldCompDataset as FCDatasetBase
     import lmdb
     from loguru import logger as log
+    # pylint: enable=import-outside-toplevel
 
     class FoldCompDataset(FCDatasetBase):
         def _get_indices(self):
             """Get indices for the dataset."""
             # Read in look up file
-            LOOKUP_FILE = pathlib.Path(self.root) / f"{self.database}.lookup"
+            LOOKUP_FILE = pathlib.Path(self.root) / f"{self.database}.lookup"  # pylint: disable=invalid-name
             if not LOOKUP_FILE.exists():
                 self.download()
 
             # Read in id_to_idx file
-            ID2IDX_FILE = pathlib.Path(self.root) / f"{self.database}.id_to_idx"
+            ID2IDX_FILE = pathlib.Path(self.root) / f"{self.database}.id_to_idx"  # pylint: disable=invalid-name
             with semaphore("proxyz_dataset_foldcomp_database_lookup", 1):
                 class Protein2Idx:
                     def __init__(self):
@@ -167,7 +169,7 @@ def foldcomp_dataset(file_path: str):
             # # Extract accessions
             # accessions = [x.strip().split("\t")[1] for x in tqdm(accessions)]
             # Get indices
-            if self.ids is None:
+            if self.ids is None:  # pylint: disable=access-member-before-definition
                 self.ids = list(self.protein_to_idx.keys())
             # Exclude indices
             if self.exclude_ids is not None:
@@ -219,7 +221,7 @@ def foldcomp_dataset(file_path: str):
 
     o = urlparse(file_path)
     if o.fragment:
-        with opener(o.fragment) as f:
+        with opener(o.fragment) as f:  # pylint: disable=contextmanager-generator-missing-cleanup
             if HAVE_BIGLIST and env("proxyz_dataset_foldcomp_biglist_enabled", True):
                 ids = Biglist.new(batch_size=4096)
                 ids.extend(line for line in lines(f) if not line.startswith("#"))
@@ -234,7 +236,7 @@ def foldcomp_dataset(file_path: str):
     ):
         return FoldCompDataset(
             root=file_path.parent,
-            database=file_path.name,  # name of the dataset. See: https://github.com/steineggerlab/foldcomp
+            database=file_path.name,
             ids=ids,
             fraction=1,
         )

@@ -2,12 +2,14 @@ import torch
 from torch.nn import functional as F
 
 
+# pylint: disable=line-too-long
 contact_ranges = {"short": (6, 12), "medium": (12, 24), "long": (24, None)}
 
 
 def contact_precision(
     predictions: torch.Tensor,
     targets: torch.Tensor,
+    *,
     src_lengths: torch.Tensor | None = None,
     minsep: int = 6,
     maxsep: int | None = None,

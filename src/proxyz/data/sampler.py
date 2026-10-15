@@ -109,7 +109,7 @@ def iter_cluster_map(file_paths: Sequence[str]):
         # Load the cluster file and build mapping: data_row_id -> cluster_id
         cluster_map = defaultdict(list)  # cluster_id -> [data_row_id]
 
-        with opener(file_path) as f:
+        with opener(file_path) as f:  # pylint: disable=contextmanager-generator-missing-cleanup
             for line in lines(f):
                 cluster_id, *data_row_ids = line.split("\t")
                 cluster_map[cluster_id] += data_row_ids
@@ -117,7 +117,7 @@ def iter_cluster_map(file_paths: Sequence[str]):
         yield from cluster_map.items()
 
     def cluster_map_from_db(file_path):
-        import lmdb
+        import lmdb  # pylint: disable=import-outside-toplevel
 
         with lmdb.open(file_path, readonly=True, lock=False, max_dbs=1) as ctx:
             db = ctx.open_db(b"cluster_map", dupsort=True)

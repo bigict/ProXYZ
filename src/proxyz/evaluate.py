@@ -1,15 +1,19 @@
 import os
-from typing import Dict, List, Optional, Tuple
+import logging
+import shutil
+from typing import List, Optional, Tuple
 
 import click
 import torch
-import tqdm
+from tqdm import tqdm
 from transformers import AutoTokenizer, EsmForProteinFolding
 from transformers.models.esm.openfold_utils.feats import atom14_to_atom37
 from transformers.models.esm.openfold_utils.protein import Protein as OFProtein
 from transformers.models.esm.openfold_utils.protein import to_pdb
 
 from proxyz.utils import dict2object
+
+logger = logging.getLogger(__name__)
 
 
 def read_fasta(fasta_input_file: str) -> List[Tuple[str, str]]:
@@ -72,7 +76,7 @@ def run_esmfold(
     # Run ESMFold
     list_of_strings_pdb = []
     if len(sequences) == 8:
-        max_nres = max([len(x) for x in sequences])
+        max_nres = max(len(x) for x in sequences)
         if max_nres > 700:
             batch_size = 1
             num_batches = 8
@@ -106,10 +110,10 @@ def run_esmfold(
         inputs = {k: inputs[k].cuda() for k in inputs}
 
         with torch.no_grad():
-            _outputs = esm_model(**inputs)
+            outputs = esm_model(**inputs)
 
-        _list_of_strings_pdb = _convert_esm_outputs_to_pdb(_outputs)
-        list_of_strings_pdb.extend(_list_of_strings_pdb)
+        strings_pdb = _convert_esm_outputs_to_pdb(outputs)
+        list_of_strings_pdb.extend(strings_pdb)
 
     # Create out directory if not there
     if not os.path.exists(path_to_esmfold_out):
@@ -128,8 +132,8 @@ def run_esmfold(
         # Clean up individual FASTA files directory
         try:
             shutil.rmtree(os.path.dirname(os.path.dirname(fdir)))
-        except Exception as e:
-            logger.warning(f"Could not clean up FASTA directory: {e}")
+        except OSError as e:
+            logger.warning("Could not clean up FASTA directory: %s", e)
 
     return out_esm_paths
 
@@ -171,11 +175,11 @@ def _convert_esm_outputs_to_pdb(outputs) -> List[str]:
 def main(**args):
     args = dict2object(**args)
 
-    for i, fasta_file in enumerate(args.fasta_files):
+    for i, fasta_file in tqdm(enumerate(args.fasta_files)):
         data = read_fasta(fasta_file)
         for j in range(0, len(data), 8):
             run_esmfold(
-                [sequence for _, sequence in data[j: j+8]],
+                [sequence for _, sequence in data[j:j + 8]],
                 path_to_esmfold_out=args.output_dir,
                 suffix=f"{i}_{j}.pdb",
                 keep_outputs=True,

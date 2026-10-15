@@ -16,7 +16,7 @@ def cache(func):
     return wrapper
 
 
-class dict2object(object):
+class dict2object(object):  # pylint: disable=invalid-name
     def __init__(self, **args):
         self.__dict__.update(args)
 

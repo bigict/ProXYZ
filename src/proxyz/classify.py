@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoProcessor
 from tqdm import tqdm
 
-from proxyz.data import dataset, sampler
+from proxyz.data import sampler
 from proxyz.utils import data_utils, dict2object, model_utils, structure_utils
 
 
@@ -32,7 +32,8 @@ from proxyz.utils import data_utils, dict2object, model_utils, structure_utils
     type=click.Path(),
     multiple=True,
     help="Clustering files for cluster-based sampling. Each file has two columns: "
-    "cluster_id and data_row_id. Sampling weight = n / (1 + log(n)) where n is cluster size.",
+    "cluster_id and data_row_id. Sampling weight = n / (1 + log(n)) or 1 + log(n) "
+    "where n is cluster size.",
 )
 @click.option(
     "--data_format",
@@ -45,10 +46,12 @@ from proxyz.utils import data_utils, dict2object, model_utils, structure_utils
     "--max_sequence_length",
     type=int,
     default=None,
-    help="If set, randomly crop sequences longer than this to a subsequence of this length. "
-    "Useful for controlling memory usage with variable-length inputs.",
+    help="If set, randomly crop sequences longer than this to a subsequence of this "
+    "length. Useful for controlling memory usage with variable-length inputs.",
 )
-@click.option("--batch_size", type=int, default=8, help="Sequences classified per batch.")
+@click.option(
+    "--batch_size", type=int, default=8, help="Sequences classified per batch."
+)
 @click.option(
     "--output_dir",
     type=click.Path(),
@@ -97,7 +100,9 @@ def main(**args):
     model_path = model_utils.resolve_model_path(args.model_dir)
     processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
 
-    if processor.tokenizer.bos_token_id is None or processor.tokenizer.eos_token_id is None:
+    if processor.tokenizer.bos_token_id is None or (
+        processor.tokenizer.eos_token_id is None
+    ):
         raise click.UsageError(
             "Tokenizer has no [BOS]/[EOS]. Retrain with the updated train.py "
             "(which adds them) or point --model_dir at such a model."
@@ -130,15 +135,16 @@ def main(**args):
         model = torch.compile(model)
 
     if args.verbose:
-        print(f"--- ProXYZ Classification ---")
+        print(f"--- ProXYZ Classification ---")  # pylint: disable=f-string-without-interpolation
         print(f"Model:       {model_path}")
         print(f"Device:      {device}  dtype={dtype}  attn={attn_impl}")
-        print(f"Vocab size:  {len(processor.tokenizer)}  bos={processor.tokenizer.bos_token_id} eos={processor.tokenizer.eos_token_id}")
+        print(f"Vocab size:  {len(processor.tokenizer)}  bos={processor.tokenizer.bos_token_id} eos={processor.tokenizer.eos_token_id}")  # pylint: disable=line-too-long
         print(f"Data files:  {','.join(args.data_files)}")
         print(f"Data format: {args.data_format}")
 
     # ==========================================
-    # 3. ENCODE PROMPT & CLASSIFY IN BATCHES # ==========================================
+    # 3. ENCODE PROMPT & CLASSIFY IN BATCHES
+    # ==========================================
     # Ban all tokens whose string representation contains "X" (unknown residue).
     # This prevents the model from emitting ambiguous amino-acid placeholders.
     eval_dataset = data_utils.create_dataset(args.data_files, args.data_format)
@@ -158,7 +164,7 @@ def main(**args):
     if args.cluster_files:
         eval_sampler = sampler.from_cluster_files(eval_dataset, args.cluster_files)
         if args.verbose:
-            print(f"--- Cluster-based sampling ---")
+            print(f"--- Cluster-based sampling ---")  # pylint: disable=f-string-without-interpolation
             print(f"Clusters: {len(eval_sampler):,}")
 
     eval_dataloader = DataLoader(
@@ -199,7 +205,7 @@ def main(**args):
             )
 
             distogram_metrics = structure_utils.contact_precision(
-                contact_matrix, contact_target, valid_length
+                contact_matrix, contact_target, src_lengths=valid_length
             )
             for contact_range in args.contact_ranges:
                 minsep, maxsep = structure_utils.contact_ranges[contact_range]
@@ -209,7 +215,7 @@ def main(**args):
                         for key, value in structure_utils.contact_precision(
                             contact_matrix,
                             contact_target,
-                            valid_length,
+                            src_lengths=valid_length,
                             minsep=minsep,
                             maxsep=maxsep,
                         ).items()

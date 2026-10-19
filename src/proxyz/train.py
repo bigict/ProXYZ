@@ -107,6 +107,11 @@ from proxyz.utils import data_utils, model_utils, dict2object
     help="Character: Model has distogram_lm_head",
 )
 @click.option(
+    "--model_use_char_fusion",
+    is_flag=True,
+    help="Character: Model fuse char encoder/decoder features.",
+)
+@click.option(
     "--model_cle_vocab_size",
     type=int,
     default=dataset.cle_vocab_size,
@@ -135,7 +140,7 @@ from proxyz.utils import data_utils, model_utils, dict2object
     default=None,
     help="Partial fine-tuning: keep only the parameters of these modules trainable and "
     "freeze everything else. Repeat for multiple patterns, e.g. "
-    "'--trainable_keys .distogram_head --trainable_keys model.trunk'."
+    "'--trainable_keys distogram_head. --trainable_keys model.trunk'."
 )
 @click.option(
     "--attn_implementation",
@@ -144,7 +149,7 @@ from proxyz.utils import data_utils, model_utils, dict2object
     help="Attention backend. flash_attention_2 is fastest on Ampere/Ada+ GPUs.",
 )
 @click.option(
-    "--gradient_checkpointing", is_flag=True, help="Enable gradient checkpointing.",
+    "--gradient_checkpointing", is_flag=True, help="Enable gradient checkpointing."
 )
 @click.option(
     "--torch_compile",
@@ -349,6 +354,7 @@ def main(**args):
         has_char_lm_head=args.model_has_char_lm_head,
         has_cle_lm_head=args.model_has_cle_lm_head,
         has_distogram_lm_head=args.model_has_distogram_lm_head,
+        use_char_fusion=args.model_use_char_fusion,
         cle_vocab_size=args.model_cle_vocab_size,
         distogram_cap=args.model_distogram_cap,
         distogram_chunk_size=args.model_distogram_chunk_size,
@@ -383,7 +389,6 @@ def main(**args):
         # so trainable modules behind a frozen embedding would never be updated.
         if args.gradient_checkpointing:
             model.enable_input_require_grads()
-
 
     # ==========================================
     # 3. PREPARE YOUR DATASET
@@ -478,7 +483,9 @@ def main(**args):
                 # TP and EP-as-TP ranks see replicated batches; `num_processes` over-counts
                 # them by `tp_size`. Mirror the divisor used in `_get_num_items_in_batch`.
                 loss_scale = self.accelerator.num_processes
-                if (pc := getattr(self.accelerator, "parallelism_config", None)) is not None:
+                if (
+                    pc := getattr(self.accelerator, "parallelism_config", None)
+                ) is not None:
                     loss_scale //= pc.tp_size
                 loss_scale = loss_scale if self.args.n_gpu <= 1 else self.args.n_gpu
             else:

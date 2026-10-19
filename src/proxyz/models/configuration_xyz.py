@@ -83,6 +83,9 @@ class XYZConfig(PreTrainedConfig):
         char decoder output.  Predicts pairwise residue–residue distance
         bins via an outer-sum MLP.
 
+    use_char_fusion (`bool`, *optional*, defaults to `False`):
+        If ``True``, fuse fuse char encoder/decoder features.
+
     cle_vocab_size (`int`, *optional*, defaults to 26):
         CLE vocabu size.
 
@@ -116,7 +119,12 @@ class XYZConfig(PreTrainedConfig):
     """
 
     model_type = "xyz"
-    keys_to_ignore_at_inference = ["past_key_values", "char_past_key_values", "offset_mapping"]
+    keys_to_ignore_at_inference = [
+        "past_key_values",
+        "char_enc_past_key_values",
+        "char_dec_past_key_values",
+        "offset_mapping",
+    ]
 
     # ---- Tensor-parallel / pipeline-parallel plans (inherited from Llama) ----
     base_model_tp_plan = {
@@ -167,6 +175,7 @@ class XYZConfig(PreTrainedConfig):
     has_char_lm_head: bool = False
     has_cle_lm_head: bool = False
     has_distogram_lm_head: bool = False
+    use_char_fusion: bool = False
 
     cle_vocab_size: int = 26
 

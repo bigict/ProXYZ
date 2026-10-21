@@ -13,6 +13,8 @@ from transformers.processing_utils import ProcessorMixin
 from transformers.utils import logging
 
 
+# pylint: enable=unused-import
+
 logger = logging.get_logger(__name__)
 
 
@@ -141,6 +143,7 @@ class XYZProcessor(ProcessorMixin):
         self,
         examples: dict,
         tokenized: dict = None,
+        *,
         bpe_dropout: float | None = None,
         fim_apply: bool = False,
         fim_sft_style: bool = False,
@@ -163,6 +166,7 @@ class XYZProcessor(ProcessorMixin):
         self,
         examples: dict,
         tokenized: dict,
+        *,
         bpe_dropout: float = 1.0,
         fim_apply: bool = False,
         fim_sft_style: bool = False,

@@ -50,6 +50,7 @@ def prepare_inputs(
             inputs["distogram_labels"][..., :-1],
             inputs["distogram_labels"][...,  -1],
         )
+        inputs["distogram_breaks"] = processor.distogram_bins
     if "residue_idx" in inputs and "char_position_ids" not in inputs:
         inputs["char_position_ids"] = inputs["residue_idx"]
     return inputs

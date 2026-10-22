@@ -110,6 +110,8 @@ class XYZConfig(PreTrainedConfig):
         loss weight of samped triangle-inequality consistency on soft distances.
     triangle_consistency_margin(`float`, *optional*, defaults to 2):
         margin on loss of samped triangle-inequality consistency on soft distances.
+    triangle_consistency_threshold(`float`, *optional*, defaults to 10):
+        threshold to filter samped triangle-inequality consistency on soft distances.
     triangle_consistency_n(`int`, *optional*, defaults to 4096):
         number of samped triangle-inequality consistency on soft distances.
 
@@ -193,6 +195,7 @@ class XYZConfig(PreTrainedConfig):
 
     triangle_consistency_weight: float = 0.0
     triangle_consistency_margin: float = 2.0
+    triangle_consistency_threshold: float = 10.0
     triangle_consistency_n: int = 4096
 
     def __post_init__(self, **kwargs):

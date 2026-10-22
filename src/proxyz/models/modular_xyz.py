@@ -156,6 +156,8 @@ class XYZConfig(LlamaConfig):
         loss weight of samped triangle-inequality consistency on soft distances.
     triangle_consistency_margin(`float`, *optional*, defaults to 2):
         margin on loss of samped triangle-inequality consistency on soft distances.
+    triangle_consistency_threshold(`float`, *optional*, defaults to 10):
+        threshold to filter samped triangle-inequality consistency on soft distances.
     triangle_consistency_n(`int`, *optional*, defaults to 4096):
         number of samped triangle-inequality consistency on soft distances.
 
@@ -217,6 +219,7 @@ class XYZConfig(LlamaConfig):
 
     triangle_consistency_weight: float = 0.
     triangle_consistency_margin: float = 2.0
+    triangle_consistency_threshold: float = 10.0
     triangle_consistency_n: int = 4096
 
     def __post_init__(self, **kwargs):
@@ -358,7 +361,9 @@ def triangle_consistency_loss(
     distogram_logits: torch.FloatTensor,
     distogram_labels: torch.LongTensor,
     distogram_breaks: torch.FloatTensor,
+    *,
     margin: float = 2.0,
+    threshold: float = 10,
     n_tri: int = 4096,
     ignore_index: int = -100,
     eps: float = 1e-6,
@@ -370,7 +375,7 @@ def triangle_consistency_loss(
 
     distogram_bins = bin_centers_from_breaks(
         distogram_breaks.to(distogram_logits.device)
-    )
+    ).to(distogram_logits.dtype)
     d = (distogram_logits.softmax(-1) @ distogram_bins).reshape(B, -1)
     m = (distogram_labels != ignore_index).reshape(B, -1)
 
@@ -386,7 +391,7 @@ def triangle_consistency_loss(
     mkj = m.gather(1, k * L + j)
 
     e = nn.functional.relu(dij - (dik + dkj) - margin)
-    m = mij & mik & mkj
+    m = mij & mik & mkj & (dik <= threshold) & (dkj <= threshold)
 
     num_items_in_batch = kwargs.get("num_items_in_batch")
     if num_items_in_batch is None:
@@ -394,6 +399,8 @@ def triangle_consistency_loss(
 
     if torch.is_tensor(num_items_in_batch):
         num_items_in_batch = num_items_in_batch.to(e.device)
+    if m.any():
+        num_items_in_batch = num_items_in_batch * m.sum() / n_tri
     return (e * m).sum() / num_items_in_batch
 
 
@@ -1068,6 +1075,7 @@ class XYZForCausalLM(LlamaForCausalLM):
                             aux_loss["distogram_consistency_loss"] = triangle_consistency_loss(
                                 distogram_logits, distogram_labels, kwargs["distogram_breaks"],
                                 margin=self.config.triangle_consistency_margin,
+                                threshold=self.config.triangle_consistency_threshold,
                                 n_tri=self.config.triangle_consistency_n,
                                 num_items_in_batch=kwargs.get("num_items_in_batch"),
                                 ignore_index=ignore_index,

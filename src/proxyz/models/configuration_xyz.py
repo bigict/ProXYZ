@@ -106,6 +106,13 @@ class XYZConfig(PreTrainedConfig):
         first sequence dimension to reduce peak memory.  ``0`` disables
         chunking (compute the full ``L×L`` matrix at once).
 
+    triangle_consistency_weight(`float`, *optional*, defaults to 0):
+        loss weight of samped triangle-inequality consistency on soft distances.
+    triangle_consistency_margin(`float`, *optional*, defaults to 2):
+        margin on loss of samped triangle-inequality consistency on soft distances.
+    triangle_consistency_n(`int`, *optional*, defaults to 4096):
+        number of samped triangle-inequality consistency on soft distances.
+
     Note:
         ``char_head_dim`` is intentionally omitted — the char stacks reuse the
         token-level ``head_dim`` so that RoPE can be shared.
@@ -183,6 +190,10 @@ class XYZConfig(PreTrainedConfig):
     distogram_intermediate_size: int = 32
     distogram_cap: float = 0.0
     distogram_chunk_size: int = 0  # 0 = no chunking (compute full bxL×L at once)
+
+    triangle_consistency_weight: float = 0.0
+    triangle_consistency_margin: float = 2.0
+    triangle_consistency_n: int = 4096
 
     def __post_init__(self, **kwargs):
         # Default char KV heads to char query heads (MHA) when unspecified.

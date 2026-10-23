@@ -19,6 +19,7 @@ from torch import nn
 # pylint: disable=unused-import
 from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.models.llama.modeling_llama import (
+    LlamaAttention,
     LlamaDecoderLayer,
     LlamaForCausalLM,
     LlamaForSequenceClassification,
@@ -37,7 +38,7 @@ from transformers.generation import GenerationMixin
 from transformers.integrations import (
     use_kernel_forward_from_hub, use_kernel_func_from_hub, use_kernelized_func
 )
-from transformers.masking_utils import create_causal_mask
+from transformers.masking_utils import create_bidirectional_mask, create_causal_mask
 from transformers.modeling_layers import (
     GenericForSequenceClassification,
     GenericForTokenClassification,
@@ -130,7 +131,11 @@ class XYZConfig(LlamaConfig):
         bins via an outer-sum MLP.
 
     use_char_fusion (`bool`, *optional*, defaults to `False`):
-        If ``True``, fuse fuse char encoder/decoder features.
+        If ``True``, fuse char encoder/decoder features.
+
+    use_bidirectional_refiner (`bool`, *optional*, defaults to `False`):
+        If ``True``, refine classification-style task with a bidirectional
+        attention.
 
     cle_vocab_size (`int`, *optional*, defaults to 26):
         CLE vocabu size.
@@ -257,6 +262,10 @@ class XYZConfig(LlamaConfig):
             [self.has_char_lm_head, self.has_cle_lm_head, self.has_distogram_lm_head]
         )
 
+    @property
+    def has_classification(self):
+        return any([self.has_cle_lm_head, self.has_distogram_lm_head])
+
 
 class XYZRMSNorm(LlamaRMSNorm):
     pass
@@ -271,11 +280,15 @@ class XYZMLP(LlamaMLP):
 
 
 class XYZCharFusion(nn.Module):
-    def __init__(self, config: XYZConfig):
+    def __init__(self, config: XYZConfig, use_char_fusion: bool | None = None):
         super().__init__()
         self.config = config
 
-        if config.use_char_fusion:
+        self.use_char_fusion = use_char_fusion
+        if self.use_char_fusion is None:
+            self.use_char_fusion = self.config.use_char_fusion
+
+        if self.use_char_fusion:
             self.gating = nn.Linear(
                 config.char_hidden_size * 2, config.char_hidden_size
             )
@@ -288,9 +301,55 @@ class XYZCharFusion(nn.Module):
             nn.init.constant_(self.gating.bias, -4.0)
 
     def forward(self, x: torch.FloatTensor, g: torch.FloatTensor) -> torch.FloatTensor:
-        if self.config.use_char_fusion:
+        if self.use_char_fusion:
             x = x + (self.gating(torch.cat((x, g), dim=-1))).sigmoid() * self.proj(g)
         return x
+
+
+class XYZBidirectionalRefiner(nn.Module):
+    def __init__(self, config: XYZConfig):
+        super().__init__()
+        self.config = config
+
+        if config.use_bidirectional_refiner:
+            with config.characterization():
+                self.layers = nn.ModuleList(
+                    [
+                        XYZDecoderLayer(config, layer_idx, is_causal=False)
+                        for layer_idx in range(config.num_hidden_layers)
+                    ]
+                )
+                self.norm = XYZRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            self.fusion = XYZCharFusion(config, use_char_fusion=True)
+
+    def forward(
+        self,
+        inputs_embeds: torch.FloatTensor,
+        attention_mask: torch.Tensor | None = None,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> torch.FloatTensor:
+        if self.config.use_bidirectional_refiner:
+            bidirectional_mask = create_bidirectional_mask(
+                config=self.config,
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+            )
+
+            hidden_states = inputs_embeds
+            for decoder_layer in self.layers:
+                hidden_states = decoder_layer(
+                    hidden_states,
+                    attention_mask=bidirectional_mask,
+                    position_embeddings=position_embeddings,
+                    **kwargs,
+                )
+
+            hidden_states = self.norm(hidden_states)
+
+            inputs_embeds = self.fusion(inputs_embeds, hidden_states)
+
+        return inputs_embeds
 
 
 class XYZDistogram(nn.Module):
@@ -336,8 +395,26 @@ class XYZDistogram(nn.Module):
         return x.contiguous()  # FIX: self.loss_function
 
 
+class XYZAttention(LlamaAttention):
+    def __init__(self, config: XYZConfig, layer_idx: int, is_causal: bool = True):
+        super().__init__(config, layer_idx)
+        self.is_causal = is_causal  # overide!
+
+
 class XYZDecoderLayer(LlamaDecoderLayer):
-    pass
+    def __init__(self, config: XYZConfig, layer_idx: int, is_causal: bool = True):
+        super().__init__()
+        self.hidden_size = config.hidden_size
+
+        self.self_attn = XYZAttention(
+            config=config, layer_idx=layer_idx, is_causal=is_causal
+        )
+
+        self.mlp = XYZMLP(config)
+        self.input_layernorm = XYZRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = XYZRMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
 
 
 class XYZDecoderLayers(nn.Module):
@@ -357,7 +434,7 @@ class XYZDecoderLayers(nn.Module):
         self,
         inputs_embeds: torch.FloatTensor,
         causal_mask: torch.Tensor,
-        position_embeddings: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
         position_ids: torch.LongTensor | None = None,
         past_key_values: Cache | None = None,
         use_cache: bool | None = None,
@@ -449,6 +526,8 @@ class XYZModelOutputWithPast(BaseModelOutputWithPast):
         Char-decoder self-attention weights at every layer (returned when
         ``output_attentions=True``).  Each element has shape
         `(batch, num_heads, char_seq_len, char_seq_len)`.
+    char_position_embeddings (`tuple[torch.Tensor, torch.Tensor]`, *optional*):
+        Character-level position embeddings.
     """
 
     char_enc_last_hidden_state: torch.FloatTensor | None = None
@@ -459,6 +538,7 @@ class XYZModelOutputWithPast(BaseModelOutputWithPast):
     char_dec_past_key_values: Cache | None = None
     char_dec_hidden_states: tuple[torch.FloatTensor, ...] | None = None
     char_dec_attentions: tuple[torch.FloatTensor, ...] | None = None
+    char_position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None
 
 
 class XYZModel(XYZPreTrainedModel):
@@ -690,6 +770,7 @@ class XYZModel(XYZPreTrainedModel):
                 char_enc_past_key_values=encoder_outputs.past_key_values,
                 char_dec_last_hidden_state=decoder_outputs.last_hidden_state,
                 char_dec_past_key_values=decoder_outputs.past_key_values,
+                char_position_embeddings=char_position_embeddings,
             )
 
         return XYZModelOutputWithPast(
@@ -769,6 +850,8 @@ class XYZForCausalLM(LlamaForCausalLM):
             self.char_lm_head = nn.Linear(
                 config.char_hidden_size, config.vocab_size, bias=False
             )
+        if config.has_classification:
+            self.class_refiner = XYZBidirectionalRefiner(config)
         if config.has_cle_lm_head:
             self.cle_fusion = XYZCharFusion(config)
             self.cle_head = nn.Linear(
@@ -933,11 +1016,18 @@ class XYZForCausalLM(LlamaForCausalLM):
                             **kwargs,
                         )
                 aux_logits["char_logits"] = char_logits
+            class_hidden_states = char_hidden_states
+            if self.config.has_classification:
+                class_hidden_states = self.class_refiner(
+                    class_hidden_states,
+                    attention_mask=attention_mask,
+                    position_embeddings=outputs.char_position_embeddings,
+                    **kwargs,
+                )
             if self.config.has_cle_lm_head:
                 cle_logits = self.cle_head(
                     self.cle_fusion(
-                        char_hidden_states[:, slice_indices, :],
-                        outputs.char_enc_last_hidden_state[:, slice_indices, :],
+                        class_hidden_states, outputs.char_enc_last_hidden_state
                     )
                 )
                 if cle_labels is not None:
@@ -959,8 +1049,7 @@ class XYZForCausalLM(LlamaForCausalLM):
                 # pair_repr = h.unsqueeze(1) + h.unsqueeze(2)
                 distogram_logits = self.distogram_head(
                     self.distogram_fusion(
-                        char_hidden_states[:, slice_indices, :],
-                        outputs.char_enc_last_hidden_state[:, slice_indices, :],
+                        class_hidden_states, outputs.char_enc_last_hidden_state
                     )
                 )
                 if distogram_labels is not None:

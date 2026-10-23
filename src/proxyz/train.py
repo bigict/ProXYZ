@@ -112,6 +112,11 @@ from proxyz.utils import data_utils, model_utils, dict2object
     help="Character: Model fuse char encoder/decoder features.",
 )
 @click.option(
+    "--model_use_bidirectional_refiner",
+    is_flag=True,
+    help="Character: Model use bidirectional refiner for classification tasks.",
+)
+@click.option(
     "--model_cle_vocab_size",
     type=int,
     default=dataset.cle_vocab_size,
@@ -351,6 +356,7 @@ def main(**args):
         char_num_hidden_layers=args.model_char_num_hidden_layers,
         char_num_attention_heads=args.model_char_num_attention_heads,
         use_char_position_ids=args.model_use_char_position_ids,
+        use_bidirectional_refiner=args.model_use_bidirectional_refiner,
         has_char_lm_head=args.model_has_char_lm_head,
         has_cle_lm_head=args.model_has_cle_lm_head,
         has_distogram_lm_head=args.model_has_distogram_lm_head,

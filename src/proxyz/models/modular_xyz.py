@@ -205,6 +205,7 @@ class XYZConfig(LlamaConfig):
     has_cle_lm_head: bool = False
     has_distogram_lm_head: bool = False
     use_char_fusion: bool = False
+    use_bidirectional_refiner: bool = False
 
     cle_vocab_size: int = 26
 
@@ -1020,7 +1021,7 @@ class XYZForCausalLM(LlamaForCausalLM):
             if self.config.has_classification:
                 class_hidden_states = self.class_refiner(
                     class_hidden_states,
-                    attention_mask=attention_mask,
+                    attention_mask=char_attention_mask,
                     position_embeddings=outputs.char_position_embeddings,
                     **kwargs,
                 )

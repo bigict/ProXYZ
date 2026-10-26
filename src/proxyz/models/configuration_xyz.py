@@ -180,6 +180,7 @@ class XYZConfig(PreTrainedConfig):
     has_cle_lm_head: bool = False
     has_distogram_lm_head: bool = False
     use_char_fusion: bool = False
+    use_bidirectional_refiner: bool = False
 
     cle_vocab_size: int = 26
 

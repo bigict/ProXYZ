@@ -1031,7 +1031,7 @@ class XYZForCausalLM(XYZPreTrainedModel, GenerationMixin):
             if self.config.has_classification:
                 class_hidden_states = self.class_refiner(
                     class_hidden_states,
-                    attention_mask=attention_mask,
+                    attention_mask=char_attention_mask,
                     position_embeddings=outputs.char_position_embeddings,
                     **kwargs,
                 )

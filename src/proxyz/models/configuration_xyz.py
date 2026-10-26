@@ -84,7 +84,11 @@ class XYZConfig(PreTrainedConfig):
         bins via an outer-sum MLP.
 
     use_char_fusion (`bool`, *optional*, defaults to `False`):
-        If ``True``, fuse fuse char encoder/decoder features.
+        If ``True``, fuse char encoder/decoder features.
+
+    use_bidirectional_refiner (`bool`, *optional*, defaults to `False`):
+        If ``True``, refine classification-style task with a bidirectional
+        attention.
 
     cle_vocab_size (`int`, *optional*, defaults to 26):
         CLE vocabu size.
@@ -240,6 +244,10 @@ class XYZConfig(PreTrainedConfig):
     @property
     def has_characterization(self):
         return any([self.has_char_lm_head, self.has_cle_lm_head, self.has_distogram_lm_head])
+
+    @property
+    def has_classification(self):
+        return any([self.has_cle_lm_head, self.has_distogram_lm_head])
 
 
 __all__ = ["XYZConfig"]

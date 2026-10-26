@@ -289,9 +289,7 @@ class XYZCharFusion(nn.Module):
             self.use_char_fusion = self.config.use_char_fusion
 
         if self.use_char_fusion:
-            self.gating = nn.Linear(
-                config.char_hidden_size * 2, config.char_hidden_size
-            )
+            self.gating = nn.Linear(config.char_hidden_size, config.char_hidden_size)
             self.proj = nn.Linear(
                 config.char_hidden_size, config.char_hidden_size, bias=False
             )
@@ -302,7 +300,7 @@ class XYZCharFusion(nn.Module):
 
     def forward(self, x: torch.FloatTensor, g: torch.FloatTensor) -> torch.FloatTensor:
         if self.use_char_fusion:
-            x = x + (self.gating(torch.cat((x, g), dim=-1))).sigmoid() * self.proj(g)
+            x = x + self.gating((x - g).abs()).sigmoid() * self.proj(g)
         return x
 
 

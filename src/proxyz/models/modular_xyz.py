@@ -157,6 +157,15 @@ class XYZConfig(LlamaConfig):
         first sequence dimension to reduce peak memory.  ``0`` disables
         chunking (compute the full ``L×L`` matrix at once).
 
+    triangle_consistency_weight(`float`, *optional*, defaults to 0):
+        loss weight of samped triangle-inequality consistency on soft distances.
+    triangle_consistency_margin(`float`, *optional*, defaults to 2):
+        margin on loss of samped triangle-inequality consistency on soft distances.
+    triangle_consistency_threshold(`float`, *optional*, defaults to 10):
+        threshold to filter samped triangle-inequality consistency on soft distances.
+    triangle_consistency_n(`int`, *optional*, defaults to 4096):
+        number of samped triangle-inequality consistency on soft distances.
+
     Note:
         ``char_head_dim`` is intentionally omitted — the char stacks reuse the
         token-level ``head_dim`` so that RoPE can be shared.
@@ -213,6 +222,11 @@ class XYZConfig(LlamaConfig):
     distogram_intermediate_size: int = 32
     distogram_cap: float = 0.
     distogram_chunk_size: int = 0  # 0 = no chunking (compute full bxL×L at once)
+
+    triangle_consistency_weight: float = 0.
+    triangle_consistency_margin: float = 2.0
+    triangle_consistency_threshold: float = 10.0
+    triangle_consistency_n: int = 4096
 
     def __post_init__(self, **kwargs):
         # Default char KV heads to char query heads (MHA) when unspecified.
@@ -394,6 +408,60 @@ class XYZDistogram(nn.Module):
         if self.cap > 0:
             x = self.cap * (x / self.cap).tanh()
         return x.contiguous()  # FIX: self.loss_function
+
+
+def bin_centers_from_breaks(breaks: torch.FloatTensor) -> torch.FloatTensor:
+    breaks = torch.cat((breaks.new_zeros(1), breaks))  # Add start point
+    step = breaks[1:] - breaks[:-1]
+    step = torch.cat((step, step[:1]))
+    return breaks + step / 2
+
+
+def triangle_consistency_loss(
+    distogram_logits: torch.FloatTensor,
+    distogram_labels: torch.LongTensor,
+    distogram_breaks: torch.FloatTensor,
+    *,
+    margin: float = 2.0,
+    threshold: float = 10,
+    n_tri: int = 4096,
+    ignore_index: int = -100,
+    eps: float = 1e-6,
+    **kwargs,
+) -> torch.FloatTensor:
+    """Sampled triangle-inequality consistency on soft distances."""
+    assert distogram_logits.shape[:-1] == distogram_labels.shape
+    B, L, L, _ = distogram_logits.shape
+
+    distogram_bins = bin_centers_from_breaks(
+        distogram_breaks.to(distogram_logits.device)
+    ).to(distogram_logits.dtype)
+    d = (distogram_logits.softmax(-1) @ distogram_bins).reshape(B, -1)
+    m = (distogram_labels != ignore_index).reshape(B, -1)
+
+    idx = torch.randint(0, L, (B, n_tri, 3), device=d.device)
+    i, j, k = idx[..., 0], idx[..., 1], idx[..., 2]
+
+    dij = d.gather(1, i * L + j)
+    dik = d.gather(1, i * L + k)
+    dkj = d.gather(1, k * L + j)
+
+    mij = m.gather(1, i * L + j)
+    mik = m.gather(1, i * L + k)
+    mkj = m.gather(1, k * L + j)
+
+    e = nn.functional.relu(dij - (dik + dkj) - margin)
+    m = mij & mik & mkj & (dik <= threshold) & (dkj <= threshold)
+
+    num_items_in_batch = kwargs.get("num_items_in_batch")
+    if num_items_in_batch is None:
+        return (e * m).sum() / (m.sum() + eps)
+
+    if torch.is_tensor(num_items_in_batch):
+        num_items_in_batch = num_items_in_batch.to(e.device)
+    if m.any():
+        num_items_in_batch = num_items_in_batch * m.sum() / n_tri
+    return (e * m).sum() / num_items_in_batch
 
 
 class XYZAttention(LlamaAttention):
@@ -826,6 +894,9 @@ class XYZCausalLMOutputWithPast(CausalLMOutputWithPast):
     distogram_loss (`torch.FloatTensor` of shape `(1,)`, *optional*, returned when 
         `distogram_labels` is provided): Language token-classification style loss (for 
         character pairwise distogram prediction)
+    distogram_consistency_loss (`torch.FloatTensor` of shape `(1,)`, *optional*, returned when 
+        `distogram_labels` is provided): Language token-classification style loss (for 
+        character pairwise distogram prediction)
     """
 
     offset_mapping: torch.LongTensor | None = None
@@ -841,6 +912,7 @@ class XYZCausalLMOutputWithPast(CausalLMOutputWithPast):
     cle_loss: torch.FloatTensor | None = None
     distogram_logits: torch.FloatTensor | None = None
     distogram_loss: torch.FloatTensor | None = None
+    distogram_consistency_loss: torch.FloatTensor | None = None
 
 
 class XYZForCausalLM(LlamaForCausalLM):
@@ -1055,6 +1127,7 @@ class XYZForCausalLM(LlamaForCausalLM):
                 )
                 if distogram_labels is not None:
                     ignore_index = kwargs.get("ignore_index", -100)
+                    eps = 1e-6
                     # shift_distogram_labels = nn.functional.pad(
                     #     distogram_labels, (0, 1, 0, 1), value=ignore_index
                     # )
@@ -1072,7 +1145,6 @@ class XYZForCausalLM(LlamaForCausalLM):
                             **kwargs,
                         )
                     else:
-                        eps = 1e-6
                         distogram_loss = nn.functional.cross_entropy(
                             distogram_logits.reshape(-1, self.config.distogram_bins_num),
                             distogram_labels.reshape(-1),
@@ -1086,6 +1158,19 @@ class XYZForCausalLM(LlamaForCausalLM):
                         if torch.is_tensor(num_items_in_batch):
                             num_items_in_batch = num_items_in_batch.to(distogram_loss.device)
                         aux_loss["distogram_loss"] = distogram_loss / num_items_in_batch
+                    if "distogram_breaks" in kwargs and self.config.triangle_consistency_weight > 0:
+                        with self.num_items_in_batch(
+                            kwargs, self.config.triangle_consistency_n / outputs.last_hidden_state.size(-2)
+                        ):
+                            aux_loss["distogram_consistency_loss"] = triangle_consistency_loss(
+                                distogram_logits, distogram_labels, kwargs["distogram_breaks"],
+                                margin=self.config.triangle_consistency_margin,
+                                threshold=self.config.triangle_consistency_threshold,
+                                n_tri=self.config.triangle_consistency_n,
+                                num_items_in_batch=kwargs.get("num_items_in_batch"),
+                                ignore_index=ignore_index,
+                                eps=eps,
+                            ) * self.config.triangle_consistency_weight
                     # aux_loss["distogram_loss"] = self.loss_function(
                     #     logits=distogram_logits,
                     #     labels=distogram_labels,

@@ -136,6 +136,13 @@ from proxyz.utils import data_utils, model_utils, dict2object
     "the batch dimension."
 )
 @click.option(
+    "--model_triangle_consistency_weight",
+    type=float,
+    default=0,
+    help="Character: if > 0, Apply sampled triangle-inequality consistency on soft "
+    "distances."
+)
+@click.option(
     "--max_position_embeddings", type=int, default=4096, help="Context window length."
 )
 @click.option(
@@ -364,6 +371,7 @@ def main(**args):
         cle_vocab_size=args.model_cle_vocab_size,
         distogram_cap=args.model_distogram_cap,
         distogram_chunk_size=args.model_distogram_chunk_size,
+        triangle_consistency_weight=args.model_triangle_consistency_weight,
     )
     # pylint: enable=unexpected-keyword-arg
     model = XYZForCausalLM(config)

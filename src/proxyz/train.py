@@ -152,6 +152,12 @@ from proxyz.utils import data_utils, model_utils, dict2object
     "--max_position_embeddings", type=int, default=4096, help="Context window length."
 )
 @click.option(
+    "--weighted_loss_in_batch_pivot",
+    type=int,
+    default=0,
+    help="If > 0, Weighted sum loss by weight=(PIVOT / L) ** power in a mini-batch.",
+)
+@click.option(
     "--trainable_keys",
     type=str,
     multiple=True,
@@ -376,6 +382,7 @@ def main(**args):
         char_refiner_num_hidden_layers=args.model_char_refiner_num_hidden_layers,
         class_refiner_num_hidden_layers=args.model_class_refiner_num_hidden_layers,
         class_refiner_is_causal=args.model_class_refiner_is_causal,
+        weighted_loss_in_batch_pivot=args.weighted_loss_in_batch_pivot,
         cle_vocab_size=args.model_cle_vocab_size,
         distogram_cap=args.model_distogram_cap,
         distogram_chunk_size=args.model_distogram_chunk_size,

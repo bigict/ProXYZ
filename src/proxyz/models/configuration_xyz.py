@@ -96,6 +96,15 @@ class XYZConfig(PreTrainedConfig):
         Whether the attention mask should be a uni-directional (causal) or
         bi-directional mask.
 
+    weighted_loss_in_batch_pivot (`int`, *optional*, defaults to `0`):
+        If ``PIVOT>0``, weighted sum loss by w = (PIVOT / L) ** power.
+    weighted_loss_in_batch_power (`float`, *optional*, defaults to `0.5`):
+        If ``PIVOT>0``, weighted sum loss by w = (PIVOT / L) ** power.
+    weighted_loss_in_batch_clamp_min(`int`, *optional*, defaults to `100`):
+        If ``PIVOT>0``, clamp L by min=MIN.
+    weighted_loss_in_batch_clamp_max(`int`, *optional*, defaults to `800`):
+        If ``PIVOT>0``, clamp L by min=MAX.
+
     cle_vocab_size (`int`, *optional*, defaults to 26):
         CLE vocabu size.
 
@@ -189,6 +198,11 @@ class XYZConfig(PreTrainedConfig):
     char_refiner_num_hidden_layers: int = 0
     class_refiner_num_hidden_layers: int = 0
     class_refiner_is_causal: bool = False
+
+    weighted_loss_in_batch_pivot: int = 0
+    weighted_loss_in_batch_clamp_min: int = 100
+    weighted_loss_in_batch_clamp_max: int = 800
+    weighted_loss_in_batch_power: float = 0.5
 
     cle_vocab_size: int = 26
 

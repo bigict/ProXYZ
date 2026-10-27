@@ -143,6 +143,15 @@ class XYZConfig(LlamaConfig):
         Whether the attention mask should be a uni-directional (causal) or
         bi-directional mask.
 
+    weighted_loss_in_batch_pivot (`int`, *optional*, defaults to `0`):
+        If ``PIVOT>0``, weighted sum loss by w = (PIVOT / L) ** power.
+    weighted_loss_in_batch_power (`float`, *optional*, defaults to `0.5`):
+        If ``PIVOT>0``, weighted sum loss by w = (PIVOT / L) ** power.
+    weighted_loss_in_batch_clamp_min(`int`, *optional*, defaults to `100`):
+        If ``PIVOT>0``, clamp L by min=MIN.
+    weighted_loss_in_batch_clamp_max(`int`, *optional*, defaults to `800`):
+        If ``PIVOT>0``, clamp L by min=MAX.
+
     cle_vocab_size (`int`, *optional*, defaults to 26):
         CLE vocabu size.
 
@@ -214,6 +223,11 @@ class XYZConfig(LlamaConfig):
     char_refiner_num_hidden_layers: int = 0
     class_refiner_num_hidden_layers: int  = 0
     class_refiner_is_causal: bool = False
+
+    weighted_loss_in_batch_pivot: int = 0
+    weighted_loss_in_batch_clamp_min: int = 100
+    weighted_loss_in_batch_clamp_max: int = 800
+    weighted_loss_in_batch_power: float = 0.5
 
     cle_vocab_size: int = 26
 
@@ -911,6 +925,20 @@ class XYZForCausalLM(LlamaForCausalLM):
         if "num_items_in_batch" in kwargs:
             kwargs["num_items_in_batch"] = num_items_in_batch
 
+    def weighted_loss_in_batch(
+        self, loss: torch.FloatTensor, mask: torch.Tensor, eps: float = 1e-6
+    ) -> torch.FloatTensor:
+        if mask is not None and self.config.weighted_loss_in_batch_pivot > 0:
+            length = mask.sum(-1, keepdim=True).clamp(
+                min=self.config.weighted_loss_in_batch_clamp_min,
+                max=self.config.weighted_loss_in_batch_clamp_max,
+            )
+            weight = (
+                self.config.weighted_loss_in_batch_pivot / length
+            ) ** self.config.weighted_loss_in_batch_power
+            return (loss * weight).sum()
+        return loss.sum()
+
     def forward(
         self,
         input_ids: torch.LongTensor | None = None,
@@ -1125,7 +1153,11 @@ class XYZForCausalLM(LlamaForCausalLM):
                         ).view_as(distogram_labels)
                         distogram_loss = (
                             distogram_loss.sum(-1) / ((distogram_labels != ignore_index).sum(-1) + eps)
-                        ).sum()
+                        )
+                        # FIX: weighted sum
+                        distogram_loss = self.weighted_loss_in_batch(
+                            distogram_loss, char_attention_mask, eps=eps
+                        )
                         # just in case users pass an int for num_items_in_batch, which could be the case for custom trainer
                         if torch.is_tensor(num_items_in_batch):
                             num_items_in_batch = num_items_in_batch.to(distogram_loss.device)

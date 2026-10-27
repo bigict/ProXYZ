@@ -1083,9 +1083,9 @@ class XYZForCausalLM(XYZPreTrainedModel, GenerationMixin):
                             ignore_index=ignore_index,
                             reduction="none",
                         ).view_as(distogram_labels)
-                        distogram_loss = (
-                            distogram_loss.sum(-1) / ((distogram_labels != ignore_index).sum(-1) + eps)
-                        ).sum()
+                        distogram_loss = distogram_loss.sum(-1) / ((distogram_labels != ignore_index).sum(-1) + eps)
+                        # FIX: weighted sum
+                        distogram_loss = self.weighted_loss_in_batch(distogram_loss, char_attention_mask, eps=eps)
                         # just in case users pass an int for num_items_in_batch, which could be the case for custom trainer
                         if torch.is_tensor(num_items_in_batch):
                             num_items_in_batch = num_items_in_batch.to(distogram_loss.device)
@@ -1132,6 +1132,18 @@ class XYZForCausalLM(XYZPreTrainedModel, GenerationMixin):
         yield kwargs
         if "num_items_in_batch" in kwargs:
             kwargs["num_items_in_batch"] = num_items_in_batch
+
+    def weighted_loss_in_batch(
+        self, loss: torch.FloatTensor, mask: torch.Tensor, eps: float = 1e-6
+    ) -> torch.FloatTensor:
+        if mask is not None and self.config.weighted_loss_in_batch_pivot > 0:
+            length = mask.sum(-1, keepdim=True).clamp(
+                min=self.config.weighted_loss_in_batch_clamp_min,
+                max=self.config.weighted_loss_in_batch_clamp_max,
+            )
+            weight = (self.config.weighted_loss_in_batch_pivot / length) ** self.config.weighted_loss_in_batch_power
+            return (loss * weight).sum()
+        return loss.sum()
 
     def prepare_inputs_for_generation(
         self,

@@ -169,7 +169,7 @@ class XYZBidirectionalRefiner(nn.Module):
                 self.layers = nn.ModuleList(
                     [
                         XYZDecoderLayer(config, layer_idx, is_causal=False)
-                        for layer_idx in range(config.num_hidden_layers)
+                        for layer_idx in range(config.bidirectional_refiner_num_hidden_layers)
                     ]
                 )
                 self.norm = XYZRMSNorm(config.hidden_size, eps=config.rms_norm_eps)

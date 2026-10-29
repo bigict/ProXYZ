@@ -117,6 +117,12 @@ from proxyz.utils import data_utils, model_utils, dict2object
     help="Character: Model use bidirectional refiner for classification-style tasks."
 )
 @click.option(
+    "--model_bidirectional_refiner_num_hidden_layers",
+    type=int,
+    default=None,
+    help="Character: Model bidirectional refiner depth.",
+)
+@click.option(
     "--model_cle_vocab_size",
     type=int,
     default=dataset.cle_vocab_size,
@@ -357,6 +363,9 @@ def main(**args):
         char_num_attention_heads=args.model_char_num_attention_heads,
         use_char_position_ids=args.model_use_char_position_ids,
         use_bidirectional_refiner=args.model_use_bidirectional_refiner,
+        bidirectional_refiner_num_hidden_layers=(
+            args.model_bidirectional_refiner_num_hidden_layers
+        ),
         has_char_lm_head=args.model_has_char_lm_head,
         has_cle_lm_head=args.model_has_cle_lm_head,
         has_distogram_lm_head=args.model_has_distogram_lm_head,

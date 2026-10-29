@@ -166,11 +166,11 @@ class XYZBidirectionalRefiner(nn.Module):
 
         if config.use_bidirectional_refiner:
             with config.characterization():
+                is_causal = config.bidirectional_refiner_is_causal
+                num_hidden_layers = config.bidirectional_refiner_num_hidden_layers
+
                 self.layers = nn.ModuleList(
-                    [
-                        XYZDecoderLayer(config, layer_idx, is_causal=False)
-                        for layer_idx in range(config.bidirectional_refiner_num_hidden_layers)
-                    ]
+                    [XYZDecoderLayer(config, layer_idx, is_causal=is_causal) for layer_idx in range(num_hidden_layers)]
                 )
                 self.norm = XYZRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
             self.fusion = XYZCharFusion(config, use_char_fusion=True)
@@ -183,17 +183,26 @@ class XYZBidirectionalRefiner(nn.Module):
         **kwargs: Unpack[TransformersKwargs],
     ) -> torch.FloatTensor:
         if self.config.use_bidirectional_refiner:
-            bidirectional_mask = create_bidirectional_mask(
-                config=self.config,
-                inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask,
-            )
+            if self.config.bidirectional_refiner_is_causal:
+                attention_mask = create_causal_mask(
+                    config=self.config,
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=attention_mask,
+                    past_key_values=None,
+                )
+            else:
+                attention_mask = create_bidirectional_mask(
+                    config=self.config,
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=attention_mask,
+                    past_key_values=None,
+                )
 
             hidden_states = inputs_embeds
             for decoder_layer in self.layers:
                 hidden_states = decoder_layer(
                     hidden_states,
-                    attention_mask=bidirectional_mask,
+                    attention_mask=attention_mask,
                     position_embeddings=position_embeddings,
                     **kwargs,
                 )

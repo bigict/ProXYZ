@@ -94,6 +94,10 @@ class XYZConfig(PreTrainedConfig):
         Number of transformer layers in the bidirectional refiner.
         If `None`, the same with `char_num_hidden_layers`.
 
+    bidirectional_refiner_is_causal (`bool`, *optional*, defaults to False):
+        Whether the attention mask should be a uni-directional (causal) or
+        bi-directional mask.
+
     cle_vocab_size (`int`, *optional*, defaults to 26):
         CLE vocabu size.
 
@@ -186,6 +190,7 @@ class XYZConfig(PreTrainedConfig):
     use_char_fusion: bool = False
     use_bidirectional_refiner: bool = False
     bidirectional_refiner_num_hidden_layers: int | None = None
+    bidirectional_refiner_is_causal: bool = False
 
     cle_vocab_size: int = 26
 

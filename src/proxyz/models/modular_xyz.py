@@ -141,6 +141,10 @@ class XYZConfig(LlamaConfig):
         Number of transformer layers in the bidirectional refiner.
         If `None`, the same with `char_num_hidden_layers`.
 
+    bidirectional_refiner_is_causal (`bool`, *optional*, defaults to False):
+        Whether the attention mask should be a uni-directional (causal) or
+        bi-directional mask.
+
     cle_vocab_size (`int`, *optional*, defaults to 26):
         CLE vocabu size.
 
@@ -211,6 +215,7 @@ class XYZConfig(LlamaConfig):
     use_char_fusion: bool = False
     use_bidirectional_refiner: bool = False
     bidirectional_refiner_num_hidden_layers: int | None = None
+    bidirectional_refiner_is_causal: bool = False
 
     cle_vocab_size: int = 26
 
@@ -321,12 +326,13 @@ class XYZBidirectionalRefiner(nn.Module):
 
         if config.use_bidirectional_refiner:
             with config.characterization():
+                is_causal = config.bidirectional_refiner_is_causal
+                num_hidden_layers = config.bidirectional_refiner_num_hidden_layers
+
                 self.layers = nn.ModuleList(
                     [
-                        XYZDecoderLayer(config, layer_idx, is_causal=False)
-                        for layer_idx in range(
-                            config.bidirectional_refiner_num_hidden_layers
-                        )
+                        XYZDecoderLayer(config, layer_idx, is_causal=is_causal)
+                        for layer_idx in range(num_hidden_layers)
                     ]
                 )
                 self.norm = XYZRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -340,17 +346,26 @@ class XYZBidirectionalRefiner(nn.Module):
         **kwargs: Unpack[TransformersKwargs],
     ) -> torch.FloatTensor:
         if self.config.use_bidirectional_refiner:
-            bidirectional_mask = create_bidirectional_mask(
-                config=self.config,
-                inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask,
-            )
+            if self.config.bidirectional_refiner_is_causal:
+                attention_mask = create_causal_mask(
+                    config=self.config,
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=attention_mask,
+                    past_key_values=None,
+                )
+            else:
+                attention_mask = create_bidirectional_mask(
+                    config=self.config,
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=attention_mask,
+                    past_key_values=None,
+                )
 
             hidden_states = inputs_embeds
             for decoder_layer in self.layers:
                 hidden_states = decoder_layer(
                     hidden_states,
-                    attention_mask=bidirectional_mask,
+                    attention_mask=attention_mask,
                     position_embeddings=position_embeddings,
                     **kwargs,
                 )

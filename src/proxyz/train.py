@@ -123,6 +123,12 @@ from proxyz.utils import data_utils, model_utils, dict2object
     help="Character: Model bidirectional refiner depth.",
 )
 @click.option(
+    "--model_bidirectional_refiner_is_causal",
+    is_flag=True,
+    help="Character: Whether the attention mask should be a uni-directional (causal) "
+    "or bi-directional mask.",
+)
+@click.option(
     "--model_cle_vocab_size",
     type=int,
     default=dataset.cle_vocab_size,
@@ -366,6 +372,7 @@ def main(**args):
         bidirectional_refiner_num_hidden_layers=(
             args.model_bidirectional_refiner_num_hidden_layers
         ),
+        bidirectional_refiner_is_causal=args.model_bidirectional_refiner_is_causal,
         has_char_lm_head=args.model_has_char_lm_head,
         has_cle_lm_head=args.model_has_cle_lm_head,
         has_distogram_lm_head=args.model_has_distogram_lm_head,

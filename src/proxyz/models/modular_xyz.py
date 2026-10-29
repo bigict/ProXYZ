@@ -137,6 +137,10 @@ class XYZConfig(LlamaConfig):
         If ``True``, refine classification-style task with a bidirectional
         attention.
 
+    bidirectional_refiner_num_hidden_layers (`int`, *optional*, defaults to None):
+        Number of transformer layers in the bidirectional refiner.
+        If `None`, the same with `char_num_hidden_layers`.
+
     cle_vocab_size (`int`, *optional*, defaults to 26):
         CLE vocabu size.
 
@@ -206,6 +210,7 @@ class XYZConfig(LlamaConfig):
     has_distogram_lm_head: bool = False
     use_char_fusion: bool = False
     use_bidirectional_refiner: bool = False
+    bidirectional_refiner_num_hidden_layers: int | None = None
 
     cle_vocab_size: int = 26
 
@@ -218,6 +223,8 @@ class XYZConfig(LlamaConfig):
         # Default char KV heads to char query heads (MHA) when unspecified.
         if self.char_num_key_value_heads is None:
             self.char_num_key_value_heads = self.char_num_attention_heads
+        if self.bidirectional_refiner_num_hidden_layers is None:
+            self.bidirectional_refiner_num_hidden_layers = self.char_num_hidden_layers
         super().__post_init__(**kwargs)
 
     def validate_architecture(self):
@@ -317,7 +324,9 @@ class XYZBidirectionalRefiner(nn.Module):
                 self.layers = nn.ModuleList(
                     [
                         XYZDecoderLayer(config, layer_idx, is_causal=False)
-                        for layer_idx in range(config.num_hidden_layers)
+                        for layer_idx in range(
+                            config.bidirectional_refiner_num_hidden_layers
+                        )
                     ]
                 )
                 self.norm = XYZRMSNorm(config.hidden_size, eps=config.rms_norm_eps)

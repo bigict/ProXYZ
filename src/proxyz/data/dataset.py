@@ -315,6 +315,8 @@ def pyg_dropout(
 
 
 def pyg_transform(batch: list, gly_idx: int = 7, **kwargs) -> dict:
+    from graphein.protein.resi_atoms import ATOM_NUMBERING  # pylint: disable=import-outside-toplevel
+
     dropout_p = env("proxyz_dataset_pyg_dropout_p", .0)
     window_size = env("proxyz_dataset_pyg_dropout_window_size", 4)
     span_min = env("proxyz_dataset_pyg_dropout_span_min", 1)
@@ -325,7 +327,9 @@ def pyg_transform(batch: list, gly_idx: int = 7, **kwargs) -> dict:
     cle, pseudo_beta, pseudo_beta_mask = [], [], []
 
     # NOTE: Atom indices; Consider making this explicit/configurable
-    n_idx, ca_idx, c_idx, cb_idx = 0, 1, 2, 4
+    n_idx, ca_idx, c_idx, cb_idx = map(
+        lambda atom: ATOM_NUMBERING[atom], ("N", "CA", "C", "CB")
+    )
 
     for graph in batch:
         graph = pyg_dropout(

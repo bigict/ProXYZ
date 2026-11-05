@@ -37,6 +37,6 @@ conda run -n ${name} \
 conda run -n ${name} \
     pip install accelerate==1.14.0 datasets==5.0.0 tokenizers==0.22.2 transformers==5.12.0
 conda run -n ${name} \
-    pip install graphein==1.7.8 biotite==1.6.0 foldcomp==1.0.0 lightning==2.6.5
+    pip install graphein==1.7.8 rdkit==2026.9.1 biotite==1.6.0 foldcomp==1.0.0 lightning==2.6.5
 conda run -n ${name} \
     pip install biglist==0.9.6 lmdb==2.3.0 posix-ipc==1.3.2

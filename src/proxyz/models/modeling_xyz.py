@@ -159,21 +159,31 @@ class XYZCharFusion(nn.Module):
         return x
 
 
-class XYZBidirectionalRefiner(nn.Module):
-    def __init__(self, config: XYZConfig):
+class XYZCharRefiner(nn.Module):
+    def __init__(
+        self,
+        config: XYZConfig,
+        num_hidden_layers: int = 0,
+        is_causal: bool = True,
+        is_fusion: bool = True,
+    ):
         super().__init__()
         self.config = config
 
-        if config.use_bidirectional_refiner:
-            with config.characterization():
-                is_causal = config.bidirectional_refiner_is_causal
-                num_hidden_layers = config.bidirectional_refiner_num_hidden_layers
+        self.num_hidden_layers = num_hidden_layers
+        self.is_causal = is_causal
 
+        if self.num_hidden_layers > 0:
+            with config.characterization():
                 self.layers = nn.ModuleList(
-                    [XYZDecoderLayer(config, layer_idx, is_causal=is_causal) for layer_idx in range(num_hidden_layers)]
+                    [
+                        XYZDecoderLayer(config, layer_idx, is_causal=self.is_causal)
+                        for layer_idx in range(self.num_hidden_layers)
+                    ]
                 )
                 self.norm = XYZRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-            self.fusion = XYZCharFusion(config, use_char_fusion=True)
+            if is_fusion:
+                self.fusion = XYZCharFusion(config, use_char_fusion=True)
 
     def forward(
         self,
@@ -182,8 +192,8 @@ class XYZBidirectionalRefiner(nn.Module):
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> torch.FloatTensor:
-        if self.config.use_bidirectional_refiner:
-            if self.config.bidirectional_refiner_is_causal:
+        if self.num_hidden_layers > 0:
+            if self.is_causal:
                 attention_mask = create_causal_mask(
                     config=self.config,
                     inputs_embeds=inputs_embeds,
@@ -209,7 +219,8 @@ class XYZBidirectionalRefiner(nn.Module):
 
             hidden_states = self.norm(hidden_states)
 
-            inputs_embeds = self.fusion(inputs_embeds, hidden_states)
+            if hasattr(self, "fusion"):
+                inputs_embeds = self.fusion(inputs_embeds, hidden_states)
 
         return inputs_embeds
 
@@ -880,9 +891,18 @@ class XYZForCausalLM(XYZPreTrainedModel, GenerationMixin):
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
         if config.has_char_lm_head:
+            self.char_refiner = XYZCharRefiner(
+                config,
+                num_hidden_layers=config.char_refiner_num_hidden_layers,
+                is_causal=True,
+            )
             self.char_lm_head = nn.Linear(config.char_hidden_size, config.vocab_size, bias=False)
         if config.has_classification:
-            self.class_refiner = XYZBidirectionalRefiner(config)
+            self.class_refiner = XYZCharRefiner(
+                config,
+                num_hidden_layers=config.class_refiner_num_hidden_layers,
+                is_causal=config.class_refiner_is_causal,
+            )
         if config.has_cle_lm_head:
             self.cle_fusion = XYZCharFusion(config)
             self.cle_head = nn.Linear(config.char_hidden_size, config.cle_vocab_size, bias=False)

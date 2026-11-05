@@ -1044,7 +1044,14 @@ class XYZForCausalLM(XYZPreTrainedModel, GenerationMixin):
             )
 
             if self.config.has_char_lm_head:
-                char_logits = self.char_lm_head(char_hidden_states[:, slice_indices, :])
+                char_logits = self.char_lm_head(
+                    self.char_refiner(
+                        char_hidden_states[:, slice_indices, :],
+                        attention_mask=char_attention_mask,
+                        position_embeddings=outputs.char_position_embeddings,
+                        **kwargs,
+                    )
+                )
                 if char_labels is not None:
                     with self.num_items_in_batch(
                         kwargs, outputs.char_dec_last_hidden_state.size(-2) / outputs.last_hidden_state.size(-2)

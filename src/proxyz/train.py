@@ -112,18 +112,19 @@ from proxyz.utils import data_utils, model_utils, dict2object
     help="Character: Model fuse char encoder/decoder features.",
 )
 @click.option(
-    "--model_use_bidirectional_refiner",
-    is_flag=True,
-    help="Character: Model use bidirectional refiner for classification-style tasks."
-)
-@click.option(
-    "--model_bidirectional_refiner_num_hidden_layers",
+    "--model_char_refiner_num_hidden_layers",
     type=int,
-    default=None,
-    help="Character: Model bidirectional refiner depth.",
+    default=0,
+    help="Character: Model char decoder refiner depth.",
 )
 @click.option(
-    "--model_bidirectional_refiner_is_causal",
+    "--model_class_refiner_num_hidden_layers",
+    type=int,
+    default=0,
+    help="Character: Model classification refiner depth.",
+)
+@click.option(
+    "--model_class_refiner_is_causal",
     is_flag=True,
     help="Character: Whether the attention mask should be a uni-directional (causal) "
     "or bi-directional mask.",
@@ -368,15 +369,13 @@ def main(**args):
         char_num_hidden_layers=args.model_char_num_hidden_layers,
         char_num_attention_heads=args.model_char_num_attention_heads,
         use_char_position_ids=args.model_use_char_position_ids,
-        use_bidirectional_refiner=args.model_use_bidirectional_refiner,
-        bidirectional_refiner_num_hidden_layers=(
-            args.model_bidirectional_refiner_num_hidden_layers
-        ),
-        bidirectional_refiner_is_causal=args.model_bidirectional_refiner_is_causal,
         has_char_lm_head=args.model_has_char_lm_head,
         has_cle_lm_head=args.model_has_cle_lm_head,
         has_distogram_lm_head=args.model_has_distogram_lm_head,
         use_char_fusion=args.model_use_char_fusion,
+        char_refiner_num_hidden_layers=args.model_char_refiner_num_hidden_layers,
+        class_refiner_num_hidden_layers=args.model_class_refiner_num_hidden_layers,
+        class_refiner_is_causal=args.model_class_refiner_is_causal,
         cle_vocab_size=args.model_cle_vocab_size,
         distogram_cap=args.model_distogram_cap,
         distogram_chunk_size=args.model_distogram_chunk_size,

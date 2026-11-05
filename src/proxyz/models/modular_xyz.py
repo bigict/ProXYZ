@@ -133,15 +133,13 @@ class XYZConfig(LlamaConfig):
     use_char_fusion (`bool`, *optional*, defaults to `False`):
         If ``True``, fuse char encoder/decoder features.
 
-    use_bidirectional_refiner (`bool`, *optional*, defaults to `False`):
-        If ``True``, refine classification-style task with a bidirectional
-        attention.
+    char_refiner_num_hidden_layers (`int`, *optional*, defaults to 0):
+        Number of transformer layers in the Char/Decoder refiner.
 
-    bidirectional_refiner_num_hidden_layers (`int`, *optional*, defaults to None):
-        Number of transformer layers in the bidirectional refiner.
-        If `None`, the same with `char_num_hidden_layers`.
+    class_refiner_num_hidden_layers (`int`, *optional*, defaults to 0):
+        Number of transformer layers in the classification refiner.
 
-    bidirectional_refiner_is_causal (`bool`, *optional*, defaults to False):
+    class_refiner_is_causal (`bool`, *optional*, defaults to False):
         Whether the attention mask should be a uni-directional (causal) or
         bi-directional mask.
 
@@ -213,9 +211,9 @@ class XYZConfig(LlamaConfig):
     has_cle_lm_head: bool = False
     has_distogram_lm_head: bool = False
     use_char_fusion: bool = False
-    use_bidirectional_refiner: bool = False
-    bidirectional_refiner_num_hidden_layers: int | None = None
-    bidirectional_refiner_is_causal: bool = False
+    char_refiner_num_hidden_layers: int = 0
+    class_refiner_num_hidden_layers: int  = 0
+    class_refiner_is_causal: bool = False
 
     cle_vocab_size: int = 26
 
@@ -228,8 +226,6 @@ class XYZConfig(LlamaConfig):
         # Default char KV heads to char query heads (MHA) when unspecified.
         if self.char_num_key_value_heads is None:
             self.char_num_key_value_heads = self.char_num_attention_heads
-        if self.bidirectional_refiner_num_hidden_layers is None:
-            self.bidirectional_refiner_num_hidden_layers = self.char_num_hidden_layers
         super().__post_init__(**kwargs)
 
     def validate_architecture(self):
@@ -319,24 +315,31 @@ class XYZCharFusion(nn.Module):
         return x
 
 
-class XYZBidirectionalRefiner(nn.Module):
-    def __init__(self, config: XYZConfig):
+class XYZCharRefiner(nn.Module):
+    def __init__(
+        self,
+        config: XYZConfig,
+        num_hidden_layers: int = 0,
+        is_causal: bool = True,
+        is_fusion: bool = True,
+    ):
         super().__init__()
         self.config = config
 
-        if config.use_bidirectional_refiner:
-            with config.characterization():
-                is_causal = config.bidirectional_refiner_is_causal
-                num_hidden_layers = config.bidirectional_refiner_num_hidden_layers
+        self.num_hidden_layers = num_hidden_layers
+        self.is_causal = is_causal
 
+        if self.num_hidden_layers > 0:
+            with config.characterization():
                 self.layers = nn.ModuleList(
                     [
-                        XYZDecoderLayer(config, layer_idx, is_causal=is_causal)
-                        for layer_idx in range(num_hidden_layers)
+                        XYZDecoderLayer(config, layer_idx, is_causal=self.is_causal)
+                        for layer_idx in range(self.num_hidden_layers)
                     ]
                 )
                 self.norm = XYZRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-            self.fusion = XYZCharFusion(config, use_char_fusion=True)
+            if is_fusion:
+                self.fusion = XYZCharFusion(config, use_char_fusion=True)
 
     def forward(
         self,
@@ -345,8 +348,8 @@ class XYZBidirectionalRefiner(nn.Module):
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> torch.FloatTensor:
-        if self.config.use_bidirectional_refiner:
-            if self.config.bidirectional_refiner_is_causal:
+        if self.num_hidden_layers > 0:
+            if self.is_causal:
                 attention_mask = create_causal_mask(
                     config=self.config,
                     inputs_embeds=inputs_embeds,
@@ -372,7 +375,8 @@ class XYZBidirectionalRefiner(nn.Module):
 
             hidden_states = self.norm(hidden_states)
 
-            inputs_embeds = self.fusion(inputs_embeds, hidden_states)
+            if hasattr(self, "fusion"):
+                inputs_embeds = self.fusion(inputs_embeds, hidden_states)
 
         return inputs_embeds
 
@@ -872,11 +876,20 @@ class XYZForCausalLM(LlamaForCausalLM):
         super().__init__(config)
 
         if config.has_char_lm_head:
+            self.char_refiner = XYZCharRefiner(
+                config,
+                num_hidden_layers=config.char_refiner_num_hidden_layers,
+                is_causal=True,
+            )
             self.char_lm_head = nn.Linear(
                 config.char_hidden_size, config.vocab_size, bias=False
             )
         if config.has_classification:
-            self.class_refiner = XYZBidirectionalRefiner(config)
+            self.class_refiner = XYZCharRefiner(
+                config,
+                num_hidden_layers=config.class_refiner_num_hidden_layers,
+                is_causal=config.class_refiner_is_causal,
+            )
         if config.has_cle_lm_head:
             self.cle_fusion = XYZCharFusion(config)
             self.cle_head = nn.Linear(
@@ -1029,7 +1042,14 @@ class XYZForCausalLM(LlamaForCausalLM):
             ) else char_logits_to_keep
 
             if self.config.has_char_lm_head:
-                char_logits = self.char_lm_head(char_hidden_states[:, slice_indices, :])
+                char_logits = self.char_lm_head(
+                    self.char_refiner(
+                        char_hidden_states[:, slice_indices, :],
+                        attention_mask=char_attention_mask,
+                        position_embeddings=outputs.char_position_embeddings,
+                        **kwargs,
+                    )
+                )
                 if char_labels is not None:
                     with self.num_items_in_batch(
                         kwargs, outputs.char_dec_last_hidden_state.size(-2) / outputs.last_hidden_state.size(-2)

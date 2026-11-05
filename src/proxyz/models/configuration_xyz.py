@@ -86,15 +86,13 @@ class XYZConfig(PreTrainedConfig):
     use_char_fusion (`bool`, *optional*, defaults to `False`):
         If ``True``, fuse char encoder/decoder features.
 
-    use_bidirectional_refiner (`bool`, *optional*, defaults to `False`):
-        If ``True``, refine classification-style task with a bidirectional
-        attention.
+    char_refiner_num_hidden_layers (`int`, *optional*, defaults to 0):
+        Number of transformer layers in the Char/Decoder refiner.
 
-    bidirectional_refiner_num_hidden_layers (`int`, *optional*, defaults to None):
-        Number of transformer layers in the bidirectional refiner.
-        If `None`, the same with `char_num_hidden_layers`.
+    class_refiner_num_hidden_layers (`int`, *optional*, defaults to 0):
+        Number of transformer layers in the classification refiner.
 
-    bidirectional_refiner_is_causal (`bool`, *optional*, defaults to False):
+    class_refiner_is_causal (`bool`, *optional*, defaults to False):
         Whether the attention mask should be a uni-directional (causal) or
         bi-directional mask.
 
@@ -188,9 +186,9 @@ class XYZConfig(PreTrainedConfig):
     has_cle_lm_head: bool = False
     has_distogram_lm_head: bool = False
     use_char_fusion: bool = False
-    use_bidirectional_refiner: bool = False
-    bidirectional_refiner_num_hidden_layers: int | None = None
-    bidirectional_refiner_is_causal: bool = False
+    char_refiner_num_hidden_layers: int = 0
+    class_refiner_num_hidden_layers: int = 0
+    class_refiner_is_causal: bool = False
 
     cle_vocab_size: int = 26
 
@@ -203,8 +201,6 @@ class XYZConfig(PreTrainedConfig):
         # Default char KV heads to char query heads (MHA) when unspecified.
         if self.char_num_key_value_heads is None:
             self.char_num_key_value_heads = self.char_num_attention_heads
-        if self.bidirectional_refiner_num_hidden_layers is None:
-            self.bidirectional_refiner_num_hidden_layers = self.char_num_hidden_layers
         if self.head_dim is None:
             self.head_dim = self.hidden_size // self.num_attention_heads
         if self.num_key_value_heads is None:

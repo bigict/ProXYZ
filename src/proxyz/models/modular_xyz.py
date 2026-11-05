@@ -143,6 +143,24 @@ class XYZConfig(LlamaConfig):
         Whether the attention mask should be a uni-directional (causal) or
         bi-directional mask.
 
+    weighted_loss_in_batch_pivot (`int`, *optional*, defaults to `0`):
+        If ``PIVOT>0``, weighted sum loss by w = (PIVOT / L) ** power.
+    weighted_loss_in_batch_power (`float`, *optional*, defaults to `0.5`):
+        If ``PIVOT>0``, weighted sum loss by w = (PIVOT / L) ** power.
+    weighted_loss_in_batch_clamp_min(`int`, *optional*, defaults to `100`):
+        If ``PIVOT>0``, clamp L by min=MIN.
+    weighted_loss_in_batch_clamp_max(`int`, *optional*, defaults to `800`):
+        If ``PIVOT>0``, clamp L by max=MAX.
+
+    weighted_loss_in_batch_token_enabled (`bool`, *optional*, defaults to `False`):
+        if ``True``, weighted sum loss
+    weighted_loss_in_batch_char_enabled (`bool`, *optional*, defaults to `False`):
+        if ``True``, weighted sum loss
+    weighted_loss_in_batch_cle_enabled (`bool`, *optional*, defaults to `False`):
+        if ``True``, weighted sum loss
+    weighted_loss_in_batch_distogram_enabled (`bool`, *optional*, defaults to `False`):
+        if ``True``, weighted sum loss
+
     cle_vocab_size (`int`, *optional*, defaults to 26):
         CLE vocabu size.
 
@@ -214,6 +232,16 @@ class XYZConfig(LlamaConfig):
     char_refiner_num_hidden_layers: int = 0
     class_refiner_num_hidden_layers: int  = 0
     class_refiner_is_causal: bool = False
+
+    weighted_loss_in_batch_pivot: int = 0
+    weighted_loss_in_batch_clamp_min: int = 100
+    weighted_loss_in_batch_clamp_max: int = 800
+    weighted_loss_in_batch_power: float = 0.5
+
+    weighted_loss_in_batch_token_enabled: bool = False
+    weighted_loss_in_batch_char_enabled: bool = False
+    weighted_loss_in_batch_cle_enabled: bool = False
+    weighted_loss_in_batch_distogram_enabled: bool = False
 
     cle_vocab_size: int = 26
 
@@ -911,6 +939,58 @@ class XYZForCausalLM(LlamaForCausalLM):
         if "num_items_in_batch" in kwargs:
             kwargs["num_items_in_batch"] = num_items_in_batch
 
+    def item_loss_in_batch(
+        self,
+        logits: torch.FloatTensor,
+        labels: torch.Tensor,
+        vocab_size: int,
+        ignore_index: int = -100,
+        shift_labels: torch.Tensor | None = None,
+        **kwargs,
+    ) -> torch.FloatTensor:
+        # Upcast to float if we need to compute the loss to avoid potential precision issues
+        logits = logits.float()
+
+        if shift_labels is None:
+            # Shift so that tokens < n predict n
+            labels = nn.functional.pad(labels, (0, 1), value=ignore_index)
+            shift_labels = labels[..., 1:].contiguous()
+
+        # Flatten the tokens
+        logits = logits.view(-1, vocab_size)
+        shift_labels = shift_labels.view(-1)
+        shift_labels = shift_labels.to(logits.device)
+        return nn.functional.cross_entropy(
+            logits, shift_labels, ignore_index=ignore_index, reduction="none"
+        )
+
+    def weighted_loss_in_batch(
+        self,
+        loss: torch.FloatTensor,
+        mask: torch.Tensor,
+        enabled: bool = False,
+        eps: float = 1e-6,
+        **kwargs,
+    ) -> torch.FloatTensor:
+        assert loss.shape == mask.shape
+        # just in case users pass an int for num_items_in_batch, which could be the case for custom trainer
+        num_items_in_batch = kwargs.get("num_items_in_batch")
+        if torch.is_tensor(num_items_in_batch):
+            num_items_in_batch = num_items_in_batch.to(loss.device)
+        if num_items_in_batch is None:
+            num_items_in_batch = mask.sum() + eps
+
+        if enabled and self.config.weighted_loss_in_batch_pivot > 0:
+            length = mask.sum(-1, keepdim=True).clamp(
+                min=self.config.weighted_loss_in_batch_clamp_min,
+                max=self.config.weighted_loss_in_batch_clamp_max,
+            )
+            weight = (
+                self.config.weighted_loss_in_batch_pivot / length
+            ) ** self.config.weighted_loss_in_batch_power
+            return (loss * weight).sum() / num_items_in_batch
+        return loss.sum() / num_items_in_batch
+
     def forward(
         self,
         input_ids: torch.LongTensor | None = None,
@@ -1024,10 +1104,22 @@ class XYZForCausalLM(LlamaForCausalLM):
 
         loss = None
         if labels is not None:
-            loss = self.loss_function(
-                logits=logits,
-                labels=labels,
-                vocab_size=self.config.vocab_size,
+            # loss = self.loss_function(
+            #     logits=logits,
+            #     labels=labels,
+            #     vocab_size=self.config.vocab_size,
+            #     **kwargs,
+            # )
+            # FIXME: replace attention_mask with shift_labels != ignore_index
+            loss = self.weighted_loss_in_batch(
+                self.item_loss_in_batch(
+                    logits=logits,
+                    labels=labels,
+                    vocab_size=self.config.vocab_size,
+                    **kwargs,
+                ).view_as(labels),
+                attention_mask,
+                enabled=self.config.weighted_loss_in_batch_token_enabled,
                 **kwargs,
             )
 
@@ -1054,10 +1146,22 @@ class XYZForCausalLM(LlamaForCausalLM):
                     with self.num_items_in_batch(
                         kwargs, outputs.char_dec_last_hidden_state.size(-2) / outputs.last_hidden_state.size(-2)
                     ):
-                        aux_loss["char_loss"] = self.loss_function(
+                        # aux_loss["char_loss"] = self.loss_function(
+                        #     logits=char_logits,
+                        #     labels=char_labels,
+                        #     vocab_size=self.config.vocab_size,
+                        #     **kwargs,
+                        # )
+                        char_loss = self.item_loss_in_batch(
                             logits=char_logits,
                             labels=char_labels,
                             vocab_size=self.config.vocab_size,
+                            **kwargs,
+                        ).view_as(char_labels)
+                        aux_loss["char_loss"] = self.weighted_loss_in_batch(
+                            char_loss,
+                            char_attention_mask,
+                            enabled=self.config.weighted_loss_in_batch_char_enabled,
                             **kwargs,
                         )
                 aux_logits["char_logits"] = char_logits
@@ -1079,19 +1183,29 @@ class XYZForCausalLM(LlamaForCausalLM):
                     with self.num_items_in_batch(
                         kwargs, outputs.char_dec_last_hidden_state.size(-2) / outputs.last_hidden_state.size(-2)
                     ):
-                        aux_loss["cle_loss"] = self.loss_function(
+                        # aux_loss["cle_loss"] = self.loss_function(
+                        #     logits=cle_logits,
+                        #     labels=cle_labels,
+                        #     vocab_size=self.config.cle_vocab_size,
+                        #     shift_labels=cle_labels,  # FIX: Fake the `ForCausalLMLoss`
+                        #     **kwargs,
+                        # )
+                        cle_loss = self.item_loss_in_batch(
                             logits=cle_logits,
                             labels=cle_labels,
                             vocab_size=self.config.cle_vocab_size,
                             shift_labels=cle_labels,  # FIX: Fake the `ForCausalLMLoss`
                             **kwargs,
+                        ).view_as(cle_labels)
+                        aux_loss["cle_loss"] = self.weighted_loss_in_batch(
+                            cle_loss,
+                            char_attention_mask,
+                            enabled=self.config.weighted_loss_in_batch_cle_enabled,
+                            **kwargs,
                         )
                 aux_logits["cle_logits"] = cle_logits
 
             if self.config.has_distogram_lm_head:
-                # pairwise outer sum: (B, L, H) -> (B, L, L, H) -> (B, L, L, num_bins)
-                # h = char_hidden_states
-                # pair_repr = h.unsqueeze(1) + h.unsqueeze(2)
                 distogram_logits = self.distogram_head(
                     self.distogram_fusion(
                         class_hidden_states, outputs.char_enc_last_hidden_state
@@ -1099,44 +1213,27 @@ class XYZForCausalLM(LlamaForCausalLM):
                 )
                 if distogram_labels is not None:
                     ignore_index = kwargs.get("ignore_index", -100)
-                    # shift_distogram_labels = nn.functional.pad(
-                    #     distogram_labels, (0, 1, 0, 1), value=ignore_index
-                    # )
-                    # shift_distogram_labels = shift_distogram_labels[..., 1:, 1:].contiguous()
                     with self.num_items_in_batch(
                         kwargs, outputs.char_dec_last_hidden_state.size(-2) / outputs.last_hidden_state.size(-2)
                     ):
-                        num_items_in_batch = kwargs.get("num_items_in_batch")
-                    if num_items_in_batch is None:
-                        aux_loss["distogram_loss"] = self.loss_function(
+                        eps = 1e-6
+                        distogram_loss = self.item_loss_in_batch(
                             logits=distogram_logits,
                             labels=distogram_labels,
                             vocab_size=self.config.distogram_bins_num,
                             shift_labels=distogram_labels,  # FIX: Fake the `ForCausalLMLoss`
                             **kwargs,
-                        )
-                    else:
-                        eps = 1e-6
-                        distogram_loss = nn.functional.cross_entropy(
-                            distogram_logits.reshape(-1, self.config.distogram_bins_num),
-                            distogram_labels.reshape(-1),
-                            ignore_index=ignore_index,
-                            reduction="none",
                         ).view_as(distogram_labels)
                         distogram_loss = (
                             distogram_loss.sum(-1) / ((distogram_labels != ignore_index).sum(-1) + eps)
-                        ).sum()
-                        # just in case users pass an int for num_items_in_batch, which could be the case for custom trainer
-                        if torch.is_tensor(num_items_in_batch):
-                            num_items_in_batch = num_items_in_batch.to(distogram_loss.device)
-                        aux_loss["distogram_loss"] = distogram_loss / num_items_in_batch
-                    # aux_loss["distogram_loss"] = self.loss_function(
-                    #     logits=distogram_logits,
-                    #     labels=distogram_labels,
-                    #     vocab_size=self.config.distogram_bins_num,
-                    #     labels=distogram_labels,
-                    #     **kwargs,
-                    # )
+                        )
+                        aux_loss["distogram_loss"] = self.weighted_loss_in_batch(
+                            distogram_loss,
+                            char_attention_mask,
+                            enabled=self.config.weighted_loss_in_batch_distogram_enabled,
+                            eps=eps,
+                            **kwargs,
+                        )
                 aux_logits["distogram_logits"] = distogram_logits
 
         if loss is not None and aux_loss:

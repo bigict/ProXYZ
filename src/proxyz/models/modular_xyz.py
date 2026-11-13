@@ -820,9 +820,11 @@ class XYZCausalLMOutputWithPast(CausalLMOutputWithPast):
     offset_mapping (`torch.LongTensor` of shape `(batch, token_seq_len, 2)`, *optional*):
         A list of (start_char, end_char) tuples for each token, mapping tokens back to
         the original text characters.
+    token_loss (`torch.FloatTensor` of shape `(1,)`, *optional*, returned when
+        `labels` is provided): Language modeling loss (for next-token prediction)
     char_logits (`torch.FloatTensor` of shape `(batch, char_seq_len, vocab_size)`, *optional*):
         Next-character prediction logits from the char decoder LM head.
-    char_loss (`torch.FloatTensor` of shape `(1,)`, *optional*, returned when 
+    char_loss (`torch.FloatTensor` of shape `(1,)`, *optional*, returned when
         `char_labels` is provided): Language modeling loss (for next-character prediction)
     char_enc_past_key_values (`Cache`, *optional*):
         Pair of KV caches — one for the char encoder, one for the char
@@ -857,6 +859,7 @@ class XYZCausalLMOutputWithPast(CausalLMOutputWithPast):
     """
 
     offset_mapping: torch.LongTensor | None = None
+    token_loss: torch.FloatTensor | None = None
     char_logits: torch.FloatTensor | None = None
     char_loss: torch.FloatTensor | None = None
     char_enc_past_key_values: Cache | None = None
@@ -1139,6 +1142,7 @@ class XYZForCausalLM(LlamaForCausalLM):
                     # )
                 aux_logits["distogram_logits"] = distogram_logits
 
+        token_loss = loss
         if loss is not None and aux_loss:
             loss = loss + sum(aux_loss.values())
         elif aux_loss:
@@ -1157,6 +1161,7 @@ class XYZForCausalLM(LlamaForCausalLM):
             char_dec_past_key_values=outputs.char_dec_past_key_values,
             char_dec_hidden_states=outputs.char_dec_hidden_states,
             char_dec_attentions=outputs.char_dec_attentions,
+            token_loss=token_loss,
             **aux_logits,
             **aux_loss,
         )

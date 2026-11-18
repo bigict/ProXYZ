@@ -482,40 +482,51 @@ def main(**args):
                 inputs = data_utils.prepare_inputs(self.processing_class, inputs)
             return inputs
 
-        def _reduce_sum(self, x: torch.Tensor) -> torch.Tensor:
-            # Sum across data-parallel ranks; a no-op under single-process
-            # nn.DataParallel, where the visible batch is already global.
-            return self.accelerator.reduce(x, reduction="sum")
-
-        def _global_mean_loss(self, loss: torch.Tensor) -> float:
-            # Global per-token mean loss, matching the standard `loss` metric.
+        def _local_mean_loss(self, loss: torch.Tensor) -> float:
+            # Rank-local per-token mean contribution. The cross-rank sum is
+            # deferred to log() so micro-batches stay collective-free: a
+            # per-micro-batch all_reduce would defeat DDP no_sync pipelining
+            # under gradient accumulation (straggler wait at every micro-batch).
             if self.args.n_gpu > 1:
                 # nn.DataParallel: mean over gathered replicas cancels the n_gpu
-                # scaling that compute_loss applies in-place.
+                # scaling that compute_loss applies in-place; already global.
                 return loss.detach().mean().item()
-            # DDP / single process: undo the num_processes scaling, then sum ranks.
+            # DDP / single process: undo the num_processes scaling. Summing this
+            # local contribution across ranks at log time yields the global mean.
             scale = self.accelerator.num_processes or 1
-            return self._reduce_sum(loss.detach() / scale).item()
+            return (loss.detach() / scale).item()
+
+        def _reduce_scalars(self, values: list[float]) -> list[float]:
+            # One batched cross-rank SUM at log time; a no-op under single
+            # process / nn.DataParallel (num_processes == 1). Key order must
+            # match across ranks (same model config and accumulation path).
+            if self.accelerator.num_processes <= 1 or not values:
+                return values
+            tensor = torch.tensor(values, device=self.accelerator.device)
+            tensor = self.accelerator.reduce(tensor, reduction="sum")
+            return tensor.tolist()
 
         def _track_fim_metrics(self, inputs, outputs, loss):
+            # All values are rank-local; cross-rank aggregation happens once in
+            # log() (see _reduce_scalars), keeping micro-batches collective-free.
             fim_mask = inputs["is_fim"].bool()
-            n_fim = self._reduce_sum(fim_mask.sum().float()).item()
-            n_std = self._reduce_sum((~fim_mask).sum().float()).item()
+            n_fim = fim_mask.sum().item()
+            n_std = (~fim_mask).sum().item()
             n_total = n_fim + n_std
             if n_total == 0:
                 return
 
-            mean_loss = self._global_mean_loss(loss)
+            mean_loss = self._local_mean_loss(loss)
             frac_fim, frac_std = n_fim / n_total, n_std / n_total
 
-            # Global per-head losses, token and aux aggregated identically.
-            # Model outputs are unscaled snapshots (token_loss is cloned in the
-            # model), so direct reads stay correct even if the total loss is
-            # later recombined (e.g. weighted aux heads).
+            # Per-head losses, token and aux treated identically. Model outputs
+            # are unscaled snapshots (token_loss is cloned in the model), so
+            # direct reads stay correct even if the total loss is later
+            # recombined (e.g. weighted aux heads).
             heads = {}
             for key, val in outputs.items():
                 if key.endswith("_loss") and val is not None:
-                    heads[key] = self._reduce_sum(val.detach().sum()).item()
+                    heads[key] = val.detach().sum().item()
 
             if self.model.training:
                 def add(key, val):
@@ -568,14 +579,20 @@ def main(**args):
             # standard `loss`), so they average over the same step window as `loss`
             # even when an eval-only log() call happens between training logs.
             if self._train_logs and "loss" in logs:
+                keys = list(self._train_logs)
+                reduced = self._reduce_scalars([self._train_logs[k] for k in keys])
                 delta = max(self.state.global_step - self._last_logged, 1)
-                for key, val in self._train_logs.items():
+                for key, val in zip(keys, reduced):
                     logs[key] = val / delta
                 self._train_logs.clear()
                 self._last_logged = self._globalstep_last_logged
 
             if self._eval_logs:
-                for key, (num, den) in self._eval_logs.items():
+                keys = list(self._eval_logs)
+                flat = [v for k in keys for v in self._eval_logs[k]]
+                reduced = self._reduce_scalars(flat)
+                for i, key in enumerate(keys):
+                    num, den = reduced[2 * i], reduced[2 * i + 1]
                     logs[f"eval_{key}"] = num / den if den > 0 else 0.0
                 self._eval_logs.clear()
 

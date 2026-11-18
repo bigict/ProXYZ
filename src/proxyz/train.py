@@ -483,16 +483,9 @@ def main(**args):
             return inputs
 
         def _reduce_sum(self, x: torch.Tensor) -> torch.Tensor:
-            # Sum local statistics across data-parallel ranks. Under nn.DataParallel
-            # (single process) the visible batch is already global, so this is a no-op.
-            if (
-                torch.distributed.is_available()
-                and torch.distributed.is_initialized()
-                and self.accelerator.num_processes > 1
-            ):
-                x = x.clone()
-                torch.distributed.all_reduce(x, op=torch.distributed.ReduceOp.SUM)
-            return x
+            # Sum across data-parallel ranks; a no-op under single-process
+            # nn.DataParallel, where the visible batch is already global.
+            return self.accelerator.reduce(x, reduction="sum")
 
         def _global_mean_loss(self, loss: torch.Tensor) -> float:
             # Global per-token mean loss, matching the standard `loss` metric.

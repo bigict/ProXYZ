@@ -41,7 +41,12 @@ def dataset_transform(processor, examples, char_apply=True):
 
 
 def evaluate_assay(model, processor, wt_seq, assay_csv, accelerator, batch_size=1):
-    """Per-assay Spearman between model scores and DMS fitness."""
+    """Score every mutant in an assay; returns one record per mutant.
+
+    Each record carries the negative next-token loss (Model_score) and, when
+    the model has a char head, the char/token components. Spearman against
+    DMS fitness is computed downstream in run_benchmark.
+    """
     df = pd.read_csv(assay_csv)  # columns: mutant, DMS_score
 
     df["id"] = df["mutant"]
@@ -91,16 +96,6 @@ def evaluate_assay(model, processor, wt_seq, assay_csv, accelerator, batch_size=
             model_scores.append(result)
 
     return model_scores
-    df = pd.DataFrame(model_scores)
-
-    r = {"spearman": stats.spearmanr(df["Model_score"], df["DMS_score"]).statistic}
-    for key in ("char", "token"):
-        column = f"Model_score_{key}"
-        if column in df:
-            r[f"spearman_{key}"] = stats.spearmanr(
-                df[column], df["DMS_score"]
-            ).statistic
-    return r
 
 
 def run_benchmark(
@@ -168,6 +163,7 @@ def run_benchmark(
 @click.option(
     "--DMS_reference_file_path",
     type=click.Path(),
+    required=True,
     help="Reference file with list of DMSs to consider."
 )
 @click.option(
@@ -246,9 +242,6 @@ def main(**args):
         print(f"Vocab size:  {len(processor.tokenizer)}  bos={processor.tokenizer.bos_token_id} eos={processor.tokenizer.eos_token_id}")
 
     dms_mapping = pd.read_csv(args.dms_reference_file_path)
-    dms_mapping["MSA_Neff_L_category"] = dms_mapping["MSA_Neff_L_category"].apply(
-        lambda x: x[0].upper() + x[1:] if isinstance(x, str) else x
-    )
     num_DMS = len(dms_mapping)
     print(f"There are {num_DMS} DMSs in mapping file")
 

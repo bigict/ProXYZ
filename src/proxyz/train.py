@@ -572,6 +572,7 @@ def main(**args):
         adam_beta2=0.95,                           # DeepSeek beta2 standard
         adam_epsilon=1e-6,
         logging_steps=args.logging_steps,
+        include_num_input_tokens_seen="non_padding",  # track consumed non-pad tokens
         save_steps=args.save_steps,
         eval_strategy=args.eval_strategy if args.eval_files else "no",
         eval_steps=args.eval_steps if args.eval_strategy == "steps" else None,

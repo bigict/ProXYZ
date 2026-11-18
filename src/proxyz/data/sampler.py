@@ -40,6 +40,10 @@ class HierarchicalWeightedRandomSampler(WeightedRandomSampler):
 
             # Sample within each chunk
             for idx, row in enumerate(rows):
+                # torch.multinomial rejects n_sample=0; unselected chunks
+                # contribute no draws.
+                if cnt[idx] == 0:
+                    continue
                 replacement = self.replacement if cnt[idx] <= row.size(0) else True
                 col_indices = torch.multinomial(
                     row + 1e-8, cnt[idx].item(), replacement, generator=self.generator

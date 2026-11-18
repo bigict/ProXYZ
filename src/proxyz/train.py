@@ -508,14 +508,14 @@ def main(**args):
             mean_loss = self._global_mean_loss(loss)
             frac_fim, frac_std = n_fim / n_total, n_std / n_total
 
-            # Global aux-head losses (model outputs are unscaled). Derive the token
-            # loss as total minus aux to avoid the token_loss==loss aliasing that
-            # compute_loss scales in-place (which double-scaled token_loss under DDP).
+            # Global per-head losses, token and aux aggregated identically.
+            # Model outputs are unscaled snapshots (token_loss is cloned in the
+            # model), so direct reads stay correct even if the total loss is
+            # later recombined (e.g. weighted aux heads).
             heads = {}
             for key, val in outputs.items():
-                if key.endswith("_loss") and key != "token_loss" and val is not None:
+                if key.endswith("_loss") and val is not None:
                     heads[key] = self._reduce_sum(val.detach().sum()).item()
-            heads["token_loss"] = mean_loss - sum(heads.values())
 
             if self.model.training:
                 def add(key, val):

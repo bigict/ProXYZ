@@ -532,11 +532,13 @@ def main(**args):
             for tag, n in [("fim", n_fim), ("std", n_std)]:
                 logs_update(f"n_{tag}", n * loss_scale)
                 if n > 0:
-                    val = loss.detach().item()
+                    # DataParallel gathers per-replica losses into a vector;
+                    # mean() reduces them and is a no-op on scalar losses.
+                    val = loss.detach().mean().item()
                     logs_update(f"loss_{tag}", val * n / (n_fim + n_std))
                     for key, val in outputs.items():
                         if key.endswith("_loss") and val is not None:
-                            val = val.detach().item() * loss_scale
+                            val = val.detach().mean().item() * loss_scale
                             logs_update(f"{key}_{tag}", val * n / (n_fim + n_std))
 
             return (loss, outputs) if return_outputs else loss
@@ -588,7 +590,7 @@ def main(**args):
         max_steps=args.max_steps,
         dataloader_num_workers=args.dataloader_num_workers,
         dataloader_prefetch_factor=args.dataloader_prefetch_factor,
-        dataloader_persistent_workers=True,
+        dataloader_persistent_workers=args.dataloader_num_workers > 0,
         ignore_data_skip=args.ignore_data_skip,
         remove_unused_columns=False,
         report_to=report_to,                      # SwanLab + TensorBoard

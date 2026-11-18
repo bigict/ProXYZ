@@ -1138,7 +1138,9 @@ class XYZForCausalLM(XYZPreTrainedModel, GenerationMixin):
                     # )
                 aux_logits["distogram_logits"] = distogram_logits
 
-        token_loss = loss
+        # Snapshot, not alias: Trainer.compute_loss scales `loss` in-place, which
+        # would otherwise mutate token_loss too when no aux head rebinds `loss`.
+        token_loss = loss.clone() if loss is not None else None
         if loss is not None and aux_loss:
             loss = loss + sum(aux_loss.values())
         elif aux_loss:

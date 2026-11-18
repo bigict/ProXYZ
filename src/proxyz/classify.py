@@ -162,7 +162,12 @@ def main(**args):
     # Load cluster information and compute sampling weights if cluster files provided
     eval_sampler = None
     if args.cluster_files:
-        eval_sampler = sampler.from_cluster_files(eval_dataset, args.cluster_files)
+        # Dedicated seeded generator so sampling is reproducible regardless of
+        # global RNG consumption elsewhere (model loading, accelerate, ...).
+        generator = torch.Generator().manual_seed(args.seed)
+        eval_sampler = sampler.from_cluster_files(
+            eval_dataset, args.cluster_files, generator=generator
+        )
         if args.verbose:
             print(f"--- Cluster-based sampling ---")  # pylint: disable=f-string-without-interpolation
             print(f"Clusters: {len(eval_sampler):,}")

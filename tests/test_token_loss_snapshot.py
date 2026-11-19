@@ -95,9 +95,18 @@ def check_with_aux(mod):
 
 
 def load_old_module():
-    old_src = subprocess.check_output(
-        ["git", "show", "HEAD:src/proxyz/models/modeling_xyz.py"], text=True
-    )
+    # Pin the pre-fix revision (parent of the PR #132 snapshot commit): HEAD
+    # already contains the fix on any up-to-date checkout.
+    try:
+        old_src = subprocess.check_output(
+            ["git", "show", "44c109c^:src/proxyz/models/modeling_xyz.py"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+    except subprocess.CalledProcessError:
+        return None
+    if "token_loss = loss.clone()" in old_src:
+        return None
     # Standalone load: resolve relative imports against the current package
     # (configuration/processing are untouched by this change).
     old_src = old_src.replace(
@@ -128,17 +137,20 @@ def main():
     check_with_aux(models)
     print("PASS: aux path keeps token_loss + cle_loss == loss, scale-safe")
 
-    # Before/after: the old (HEAD) model aliases, the new one does not.
+    # Before/after: the pre-fix model aliases, the new one does not.
     old = load_old_module()
-    model = old.XYZForCausalLM(old.XYZConfig(**TINY)).eval()
-    input_ids, labels, *_ = make_inputs()
-    with torch.no_grad():
-        outputs = model(input_ids=input_ids, labels=labels, use_cache=False)
-    assert outputs.token_loss is outputs.loss, "expected old aliasing"
-    before = outputs.token_loss.item()
-    outputs.loss *= 2
-    assert outputs.token_loss.item() == before * 2, "expected old leak"
-    print("PASS: confirmed old code aliases and leaks the in-place scale")
+    if old is None:
+        print("SKIP: pre-fix modeling revision not available in this clone")
+    else:
+        model = old.XYZForCausalLM(old.XYZConfig(**TINY)).eval()
+        input_ids, labels, *_ = make_inputs()
+        with torch.no_grad():
+            outputs = model(input_ids=input_ids, labels=labels, use_cache=False)
+        assert outputs.token_loss is outputs.loss, "expected old aliasing"
+        before = outputs.token_loss.item()
+        outputs.loss *= 2
+        assert outputs.token_loss.item() == before * 2, "expected old leak"
+        print("PASS: confirmed old code aliases and leaks the in-place scale")
 
     print("All token_loss snapshot checks passed.")
 
